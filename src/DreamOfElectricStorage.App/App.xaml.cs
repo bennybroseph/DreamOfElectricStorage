@@ -21,8 +21,15 @@ namespace DreamOfElectricStorage.App;
 /// </summary>
 public partial class App : Application
 {
+    /// <summary>
+    /// "--demo": run on deterministic synthetic volumes, no elevation needed.
+    /// Exists for automated UI verification (screenshots + scripted input).
+    /// </summary>
+    public static bool DemoMode { get; } =
+        System.Linq.Enumerable.Contains(System.Environment.GetCommandLineArgs(), "--demo", System.StringComparer.OrdinalIgnoreCase);
+
     private Window? _window;
-    
+
     /// <summary>
     /// Initializes the singleton application object.  This is the first line of authored code
     /// executed, and as such is the logical equivalent of main() or WinMain().

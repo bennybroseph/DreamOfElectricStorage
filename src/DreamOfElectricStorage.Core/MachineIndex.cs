@@ -125,12 +125,14 @@ public sealed class MachineIndex
             await foreach (var info in reader.ReadSizesAsync(index.Volume, cancellationToken).ConfigureAwait(false))
                 batch.Add(info);
             index.ApplyLayoutInfo(batch);
-            index.ComputeDirectorySizes();
         }
         catch (Exception ex) when (ex is NotSupportedException or IOException or UnauthorizedAccessException or ArgumentException)
         {
-            // sizes stay 0 for this volume
+            // layout pass unavailable — sizes are whatever the enumeration stream carried
         }
+
+        // Rollups always run: the stream itself may carry sizes (fakes, demo data, future indexers).
+        index.ComputeDirectorySizes();
     }
 
     private static JournalState? TryQueryJournal(string volume)

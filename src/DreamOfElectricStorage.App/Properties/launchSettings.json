@@ -5,6 +5,10 @@
     },
     "DreamOfElectricStorage.App (Unpackaged)": {
       "commandName": "Project"
+    },
+    "DreamOfElectricStorage.App (Demo)": {
+      "commandName": "Project",
+      "commandLineArgs": "--demo"
     }
   }
 }

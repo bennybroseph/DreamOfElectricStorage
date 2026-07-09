@@ -83,6 +83,12 @@ public sealed partial class MainPage : Page
 
     private async void OnPageLoaded(object sender, RoutedEventArgs e)
     {
+        if (App.DemoMode)
+        {
+            await BuildIndexAsync(); // synthetic volumes, no elevation needed
+            return;
+        }
+
         if (!IsElevated())
         {
             ElevationBar.IsOpen = true;
@@ -119,13 +125,16 @@ public sealed partial class MainPage : Page
                     ? $"{p.Volume} done ({p.NodesIndexed:N0})"
                     : $"{p.Volume} …{p.NodesIndexed:N0}");
 
-            MachineIndex machine = await MachineIndex.BuildAsync(new NtfsDriveIndexer(), progress: progress);
+            MachineIndex machine = App.DemoMode
+                ? await MachineIndex.BuildAsync(new DemoDriveIndexer(), DemoDriveIndexer.Volumes, progress: progress)
+                : await MachineIndex.BuildAsync(new NtfsDriveIndexer(), progress: progress);
             stopwatch.Stop();
 
             string skipped = machine.Skipped.Count > 0
                 ? $" — skipped: {string.Join(", ", machine.Skipped.Select(s => s.Volume))}"
                 : "";
-            StatusText.Text = $"{machine.TotalCount:N0} nodes / {machine.Volumes.Count} volumes in {stopwatch.Elapsed.TotalSeconds:F1}s{skipped}";
+            StatusText.Text = $"{machine.TotalCount:N0} nodes / {machine.Volumes.Count} volumes in {stopwatch.Elapsed.TotalSeconds:F1}s{skipped}"
+                + (App.DemoMode ? " — DEMO DATA" : "");
 
             _machine = machine;
             _graph.SetIndex(machine);
