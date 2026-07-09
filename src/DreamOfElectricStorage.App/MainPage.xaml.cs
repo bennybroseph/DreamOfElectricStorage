@@ -39,8 +39,19 @@ public sealed partial class MainPage : Page
     {
         InitializeComponent();
         _graph.LevelChanged += OnGraphLevelChanged;
+        _graph.RedrawNeeded += () => GraphCanvas.Invalidate(); // animation clock → repaint
         Loaded += OnPageLoaded;
         RefreshLegend();
+
+        var homeKey = new Microsoft.UI.Xaml.Input.KeyboardAccelerator { Key = Windows.System.VirtualKey.Home };
+        homeKey.Invoked += (_, args) =>
+        {
+            if (Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(XamlRoot) is TextBox)
+                return;
+            args.Handled = true;
+            _graph.ZoomHome();
+        };
+        KeyboardAccelerators.Add(homeKey);
 
         var deleteKey = new Microsoft.UI.Xaml.Input.KeyboardAccelerator { Key = Windows.System.VirtualKey.Delete };
         deleteKey.Invoked += async (_, args) =>
@@ -227,6 +238,8 @@ public sealed partial class MainPage : Page
     }
 
     private void OnUpClick(object sender, RoutedEventArgs e) => _graph.GoUp();
+
+    private void OnHomeClick(object sender, RoutedEventArgs e) => _graph.ZoomHome();
 
     private void OnCanvasDraw(CanvasControl sender, CanvasDrawEventArgs args) =>
         _graph.Draw(sender, args.DrawingSession);

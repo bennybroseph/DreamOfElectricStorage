@@ -29,7 +29,8 @@
             </InfoBar.ActionButton>
         </InfoBar>
 
-        <Grid Grid.Row="1" Padding="12,8" ColumnSpacing="12">
+        <!-- MaxHeight contains a phantom vertical expansion (AutoSuggestBox-related) — root cause TBD. -->
+        <Grid Grid.Row="1" Padding="12,8" ColumnSpacing="12" MaxHeight="56">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="320" />
@@ -38,10 +39,14 @@
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
-            <Button x:Name="UpButton" Grid.Column="0" Content="&#x2191; Up" IsEnabled="False" Click="OnUpClick" />
+            <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                <Button x:Name="UpButton" Content="&#x2191; Up" IsEnabled="False" Click="OnUpClick" />
+                <Button x:Name="HomeButton" Content="&#x2302;" ToolTipService.ToolTip="Zoom to fit (Home)" Click="OnHomeClick" />
+            </StackPanel>
             <AutoSuggestBox
                 x:Name="SearchBox"
                 Grid.Column="1"
+                VerticalAlignment="Center"
                 PlaceholderText="Search all drives…"
                 QueryIcon="Find"
                 IsEnabled="False"
