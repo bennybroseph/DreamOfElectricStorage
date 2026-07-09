@@ -1,4 +1,4 @@
-# AppDriver.ps1 — drives the (unelevated) DreamOfElectricStorage.App window for automated
+﻿# AppDriver.ps1 — drives the (unelevated) DreamOfElectricStorage.App window for automated
 # UI verification: screenshots + synthesized mouse/keyboard input at CLIENT coordinates.
 # Coordinates match screenshots taken by this same script (client area, physical pixels).
 #
@@ -41,8 +41,11 @@ try { Add-Type -TypeDefinition $src -ErrorAction Stop } catch {}
 
 $proc = Get-Process DreamOfElectricStorage.App -ErrorAction Stop | Where-Object MainWindowHandle -ne 0 | Select-Object -First 1
 $hwnd = $proc.MainWindowHandle
-[Drv]::SetForegroundWindow($hwnd) | Out-Null
-Start-Sleep -Milliseconds 250
+# Input injection needs the window frontmost; WGC screenshots don't (works occluded).
+if ($Action.ToLowerInvariant() -ne "screenshot") {
+    [Drv]::SetForegroundWindow($hwnd) | Out-Null
+    Start-Sleep -Milliseconds 250
+}
 
 function ToScreen([int]$cx, [int]$cy) {
     $p = New-Object Drv+POINT; $p.X = $cx; $p.Y = $cy
@@ -69,19 +72,15 @@ function ClickAt([int]$cx, [int]$cy) {
 
 switch ($Action.ToLowerInvariant()) {
     "screenshot" {
-        # True screen pixels via CopyFromScreen, cropped to the window. PrintWindow is NOT
-        # used: it returns stale composition snapshots for WinUI windows (verified 2026-07-09).
-        # Window must be frontmost (this script foregrounds it above).
-        Add-Type -AssemblyName System.Drawing
-        Start-Sleep -Milliseconds 300
-        $r = New-Object Drv+RECT
-        [Drv]::GetWindowRect($hwnd, [ref]$r) | Out-Null
-        $bmp = New-Object System.Drawing.Bitmap(($r.R - $r.L), ($r.B - $r.T))
-        $g = [System.Drawing.Graphics]::FromImage($bmp)
-        $g.CopyFromScreen($r.L, $r.T, 0, 0, $bmp.Size)
-        $bmp.Save($Rest[0], [System.Drawing.Imaging.ImageFormat]::Png)
-        $g.Dispose(); $bmp.Dispose()
-        Write-Output "saved $($Rest[0]) ($($r.R - $r.L)x$($r.B - $r.T)) origin=$($r.L),$($r.T)"
+        # Windows.Graphics.Capture via CaptureCli: DWM-composited window pixels — works
+        # occluded/backgrounded (not minimized), no DPI math, and IncludeSecondaryWindows
+        # (Win11 24H2+) puts flyouts/dialogs/dropdowns in the frame. PrintWindow is NOT
+        # used: stale snapshots for WinUI. CopyFromScreen lives on in the `screen` action.
+        $exe = Get-ChildItem (Join-Path $PSScriptRoot "DreamOfElectricStorage.CaptureCli\bin") -Recurse -Filter "DreamOfElectricStorage.CaptureCli.exe" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if (-not $exe) { Write-Error "CaptureCli not built — run: dotnet build tools\DreamOfElectricStorage.CaptureCli"; exit 1 }
+        & $exe.FullName $Rest[0]
+        exit $LASTEXITCODE
     }
     "screen" {
         # Full-desktop capture around the app window — use for popups (flyouts, dialogs,
@@ -131,6 +130,7 @@ switch ($Action.ToLowerInvariant()) {
         Write-Output "key $($Rest[0])"
     }
     "type"       {
+        Add-Type -AssemblyName System.Windows.Forms
         foreach ($ch in $Rest[0].ToCharArray()) {
             [System.Windows.Forms.SendKeys]::SendWait([string]$ch) 2>$null
         }
