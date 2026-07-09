@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "DreamOfElectricStorage.App (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "DreamOfElectricStorage.App (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

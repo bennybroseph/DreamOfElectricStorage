@@ -1,0 +1,43 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{FB57BF3F-A527-457D-88A3-CC02838631A8}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DreamOfElectricStorage.Core", "src\DreamOfElectricStorage.Core\DreamOfElectricStorage.Core.csproj", "{BD4BB783-F6C7-49F5-B1A4-47236AE9E562}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DreamOfElectricStorage.App", "src\DreamOfElectricStorage.App\DreamOfElectricStorage.App.csproj", "{8CECC2DD-15F1-4568-90C7-836D7041C4FB}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{E8FC5259-930D-4DC4-976E-F3846F47AD80}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DreamOfElectricStorage.Core.Tests", "tests\DreamOfElectricStorage.Core.Tests\DreamOfElectricStorage.Core.Tests.csproj", "{C8F9D80D-587B-48A2-996B-160240F6AF7B}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{BD4BB783-F6C7-49F5-B1A4-47236AE9E562}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BD4BB783-F6C7-49F5-B1A4-47236AE9E562}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BD4BB783-F6C7-49F5-B1A4-47236AE9E562}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BD4BB783-F6C7-49F5-B1A4-47236AE9E562}.Release|Any CPU.Build.0 = Release|Any CPU
+		{8CECC2DD-15F1-4568-90C7-836D7041C4FB}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8CECC2DD-15F1-4568-90C7-836D7041C4FB}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8CECC2DD-15F1-4568-90C7-836D7041C4FB}.Release|Any CPU.ActiveCfg = Debug|Any CPU
+		{8CECC2DD-15F1-4568-90C7-836D7041C4FB}.Release|Any CPU.Build.0 = Debug|Any CPU
+		{C8F9D80D-587B-48A2-996B-160240F6AF7B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C8F9D80D-587B-48A2-996B-160240F6AF7B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C8F9D80D-587B-48A2-996B-160240F6AF7B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C8F9D80D-587B-48A2-996B-160240F6AF7B}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{BD4BB783-F6C7-49F5-B1A4-47236AE9E562} = {FB57BF3F-A527-457D-88A3-CC02838631A8}
+		{8CECC2DD-15F1-4568-90C7-836D7041C4FB} = {FB57BF3F-A527-457D-88A3-CC02838631A8}
+		{C8F9D80D-587B-48A2-996B-160240F6AF7B} = {E8FC5259-930D-4DC4-976E-F3846F47AD80}
+	EndGlobalSection
+EndGlobal

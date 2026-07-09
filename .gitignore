@@ -1,0 +1,32 @@
+# Agent files (local only)
+CLAUDE.md
+.claude/settings.local.json
+
+# .NET
+bin/
+obj/
+*.user
+
+# WinUI 3 / MSIX
+Generated Files/
+AppPackages/
+BundleArtifacts/
+*.appx
+*.appxbundle
+*.msix
+*.msixbundle
+*.pfx
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.suo
+
+# Graphify (code knowledge graph, local tooling)
+graph.json
+graphify-out/
+
+# OS
+Thumbs.db
+Desktop.ini
