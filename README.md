@@ -29,3 +29,7 @@ src/DreamOfElectricStorage.Core/   # drive indexer (no UI dependency)
 src/DreamOfElectricStorage.App/    # WinUI 3 app — the graph UI
 tests/                             # indexer tests
 ```
+
+## 📜 License
+
+Copyright © 2026 Benjamin Odom — licensed under the [GNU General Public License v3.0 or later](LICENSE).
