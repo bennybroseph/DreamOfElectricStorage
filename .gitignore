@@ -1,6 +1,7 @@
 # Agent files (local only)
 CLAUDE.md
 .claude/settings.local.json
+.mcp.json
 
 # .NET
 bin/
