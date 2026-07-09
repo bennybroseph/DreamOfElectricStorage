@@ -48,6 +48,8 @@
 
   <Capabilities>
     <rescap:Capability Name="runFullTrust" />
+    <!-- Raw volume access (NTFS MFT indexing) requires the app to run elevated. -->
+    <rescap:Capability Name="allowElevation" />
     <systemai:Capability Name="systemAIModels"/>
   </Capabilities>
 </Package>

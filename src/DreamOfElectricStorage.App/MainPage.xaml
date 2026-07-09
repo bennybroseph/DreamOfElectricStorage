@@ -6,14 +6,51 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:local="using:DreamOfElectricStorage.App"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:canvas="using:Microsoft.Graphics.Canvas.UI.Xaml"
     mc:Ignorable="d">
 
-    <Grid Padding="24" RowSpacing="8">
+    <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
         </Grid.RowDefinitions>
-        <TextBlock Grid.Row="0" Text="Dream of Electric Storage" Style="{StaticResource TitleTextBlockStyle}" />
-        <TextBlock Grid.Row="1" x:Name="StatusText" Style="{StaticResource BodyTextBlockStyle}" />
+
+        <InfoBar
+            x:Name="ElevationBar"
+            Grid.Row="0"
+            IsOpen="False"
+            IsClosable="False"
+            Severity="Warning"
+            Title="Administrator access required"
+            Message="Indexing every drive reads the NTFS master file table, which needs an elevated process.">
+            <InfoBar.ActionButton>
+                <Button Content="Restart as administrator" Click="OnRestartElevatedClick" />
+            </InfoBar.ActionButton>
+        </InfoBar>
+
+        <Grid Grid.Row="1" Padding="12,8" ColumnSpacing="12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <Button x:Name="UpButton" Grid.Column="0" Content="&#x2191; Up" IsEnabled="False" Click="OnUpClick" />
+            <TextBlock x:Name="BreadcrumbText" Grid.Column="1" VerticalAlignment="Center"
+                       Style="{StaticResource BodyStrongTextBlockStyle}" Text="" TextTrimming="CharacterEllipsis" />
+            <TextBlock x:Name="StatusText" Grid.Column="2" VerticalAlignment="Center"
+                       Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.8" Text="" />
+        </Grid>
+
+        <canvas:CanvasControl
+            x:Name="GraphCanvas"
+            Grid.Row="2"
+            Draw="OnCanvasDraw"
+            ClearColor="#FF14181F"
+            PointerPressed="OnCanvasPointerPressed"
+            PointerMoved="OnCanvasPointerMoved"
+            PointerReleased="OnCanvasPointerReleased"
+            PointerWheelChanged="OnCanvasWheel"
+            Tapped="OnCanvasTapped" />
     </Grid>
 </Page>
