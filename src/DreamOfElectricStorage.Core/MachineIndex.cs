@@ -70,6 +70,34 @@ public sealed class MachineIndex
         Volumes.SelectMany(volume => volume.Search(substring).Select(node => (volume, node)));
 
     /// <summary>
+    /// Duplicate candidates of <paramref name="node"/>: same name (case-insensitive) and same
+    /// size across all volumes, excluding the node itself. On-demand linear scan (~search cost);
+    /// content verification is a later refinement. Caller owns the index thread.
+    /// </summary>
+    public IReadOnlyList<(VolumeIndex Volume, FileNode Node)> FindDuplicates(VolumeIndex sourceVolume, FileNode node)
+    {
+        ArgumentNullException.ThrowIfNull(node);
+        if (node.IsDirectory || node.SizeBytes <= 0)
+            return [];
+
+        var matches = new List<(VolumeIndex, FileNode)>();
+        foreach (VolumeIndex volume in Volumes)
+        {
+            foreach (FileNode candidate in volume.Search(node.Name))
+            {
+                if (candidate.SizeBytes == node.SizeBytes &&
+                    !candidate.IsDirectory &&
+                    string.Equals(candidate.Name, node.Name, StringComparison.OrdinalIgnoreCase) &&
+                    !(volume == sourceVolume && candidate.Id == node.Id))
+                {
+                    matches.Add((volume, candidate));
+                }
+            }
+        }
+        return matches;
+    }
+
+    /// <summary>
     /// Streams journal change batches for one indexed volume, starting from the state
     /// captured at build time. Consumer applies each batch via <see cref="VolumeIndex.Apply"/>
     /// on the thread that owns the index. A RequiresRebuild batch ends the stream —
@@ -93,10 +121,10 @@ public sealed class MachineIndex
         try
         {
             var reader = new FileLayoutSizeReader();
-            var batch = new List<(ulong, long)>(capacity: 65536);
-            await foreach (var pair in reader.ReadSizesAsync(index.Volume, cancellationToken).ConfigureAwait(false))
-                batch.Add(pair);
-            index.ApplySizes(batch);
+            var batch = new List<FileLayoutInfo>(capacity: 65536);
+            await foreach (var info in reader.ReadSizesAsync(index.Volume, cancellationToken).ConfigureAwait(false))
+                batch.Add(info);
+            index.ApplyLayoutInfo(batch);
             index.ComputeDirectorySizes();
         }
         catch (Exception ex) when (ex is NotSupportedException or IOException or UnauthorizedAccessException or ArgumentException)

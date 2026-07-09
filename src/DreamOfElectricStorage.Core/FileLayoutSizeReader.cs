@@ -15,13 +15,13 @@ public sealed class FileLayoutSizeReader
 {
     private const int ChunkSize = 1024 * 1024;
 
-    /// <summary>Streams (FRN, size-in-bytes) pairs for every file on the volume.</summary>
-    public async IAsyncEnumerable<(ulong Frn, long SizeBytes)> ReadSizesAsync(
+    /// <summary>Streams per-file layout info (size + last-write time) for every file on the volume.</summary>
+    public async IAsyncEnumerable<FileLayoutInfo> ReadSizesAsync(
         string volume, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         using SafeFileHandle handle = VolumeHandles.Open(volume);
         byte[] buffer = new byte[ChunkSize];
-        var sizes = new List<(ulong, long)>(capacity: 8192);
+        var sizes = new List<FileLayoutInfo>(capacity: 8192);
         bool restart = true;
 
         while (true)
@@ -38,8 +38,8 @@ public sealed class FileLayoutSizeReader
 
             sizes.Clear();
             LayoutBufferParser.ParseChunk(buffer.AsSpan(0, (int)bytesReturned), sizes);
-            foreach (var pair in sizes)
-                yield return pair;
+            foreach (var info in sizes)
+                yield return info;
         }
     }
 
@@ -49,6 +49,7 @@ public sealed class FileLayoutSizeReader
         {
             Flags = PInvoke.QUERY_FILE_LAYOUT_INCLUDE_STREAMS |
                     PInvoke.QUERY_FILE_LAYOUT_INCLUDE_STREAMS_WITH_NO_CLUSTERS_ALLOCATED |
+                    PInvoke.QUERY_FILE_LAYOUT_INCLUDE_EXTRA_INFO |
                     (restart ? PInvoke.QUERY_FILE_LAYOUT_RESTART : 0),
             FilterType = QUERY_FILE_LAYOUT_FILTER_TYPE.QUERY_FILE_LAYOUT_FILTER_TYPE_NONE,
         };
@@ -78,23 +79,28 @@ public sealed class FileLayoutSizeReader
     }
 }
 
+/// <summary>Per-file result of the layout pass: size + last-write FILETIME (0 = not returned).</summary>
+public readonly record struct FileLayoutInfo(ulong Frn, long SizeBytes, long LastWriteFileTime);
+
 /// <summary>
 /// Pure span parser for FSCTL_QUERY_FILE_LAYOUT output buffers. Layouts verified against
 /// the CsWin32-generated structs: QUERY_FILE_LAYOUT_OUTPUT (16 B header; FileEntryCount@0,
 /// FirstFileOffset@4) → FILE_LAYOUT_ENTRY chain (NextFileOffset@4 rel. to entry, FileAttributes@12,
-/// FRN@16, FirstStreamOffset@28 rel. to entry) → STREAM_LAYOUT_ENTRY chain (NextStreamOffset@4,
-/// EndOfFile@24, AttributeTypeCode@36, StreamIdentifierLength@44). Offsets of 0 end a chain.
+/// FRN@16, FirstStreamOffset@28 rel., ExtraInfoOffset@32 rel.) → STREAM_LAYOUT_ENTRY chain
+/// (NextStreamOffset@4, EndOfFile@24, AttributeTypeCode@36, StreamIdentifierLength@44) and
+/// FILE_LAYOUT_INFO_ENTRY (BasicInformation@0 → LastWriteTime@16). Offsets of 0 end a chain.
 /// </summary>
 internal static class LayoutBufferParser
 {
     private const int OutputHeaderSize = 16;
     private const int FileEntryFixedSize = 40;
     private const int StreamEntryFixedSize = 48; // through StreamIdentifierLength
+    private const int InfoEntryLastWriteOffset = 16;
 
     private const uint DataAttributeTypeCode = 0x80; // $DATA
     private const uint FileAttributeDirectory = 0x10;
 
-    internal static void ParseChunk(ReadOnlySpan<byte> chunk, List<(ulong Frn, long SizeBytes)> results)
+    internal static void ParseChunk(ReadOnlySpan<byte> chunk, List<FileLayoutInfo> results)
     {
         if (chunk.Length < OutputHeaderSize)
             return;
@@ -108,15 +114,21 @@ internal static class LayoutBufferParser
                 return; // malformed tail — kernel boundary, stop
 
             var entry = chunk[(int)fileOffset..];
+            int available = (int)chunk.Length - (int)fileOffset;
             uint nextFileOffset = BinaryPrimitives.ReadUInt32LittleEndian(entry[4..]);
             uint fileAttributes = BinaryPrimitives.ReadUInt32LittleEndian(entry[12..]);
             ulong frn = BinaryPrimitives.ReadUInt64LittleEndian(entry[16..]);
             uint streamOffset = BinaryPrimitives.ReadUInt32LittleEndian(entry[28..]);
+            uint extraInfoOffset = BinaryPrimitives.ReadUInt32LittleEndian(entry[32..]);
 
             if ((fileAttributes & FileAttributeDirectory) == 0 &&
-                TryGetUnnamedDataStreamSize(entry, streamOffset, (int)chunk.Length - (int)fileOffset, out long size))
+                TryGetUnnamedDataStreamSize(entry, streamOffset, available, out long size))
             {
-                results.Add((frn, size));
+                long lastWrite = 0;
+                if (extraInfoOffset != 0 && extraInfoOffset + InfoEntryLastWriteOffset + 8 <= available)
+                    lastWrite = BinaryPrimitives.ReadInt64LittleEndian(entry[(int)(extraInfoOffset + InfoEntryLastWriteOffset)..]);
+
+                results.Add(new FileLayoutInfo(frn, size, lastWrite));
             }
 
             if (nextFileOffset == 0)

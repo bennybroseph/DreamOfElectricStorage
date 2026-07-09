@@ -5,7 +5,9 @@ namespace DreamOfElectricStorage.Core.Tests;
 public class VolumeIndexTests
 {
     // Root (frn 5) is deliberately absent — MFT enumeration doesn't emit it.
-    private static readonly FileNode[] SampleTree =
+    // Property, not static readonly: FileNode is partially mutable (SizeBytes/LastWriteFileTime),
+    // so shared instances would leak state between tests.
+    private static FileNode[] SampleTree =>
     [
         new(Id: 10, ParentId: 5, Name: "Users", SizeBytes: 0, IsDirectory: true),
         new(Id: 11, ParentId: 10, Name: "benny", SizeBytes: 0, IsDirectory: true),
@@ -122,15 +124,21 @@ public class VolumeIndexTests
     }
 
     [Fact]
-    public async Task ApplySizes_SetsFilesByFrn_SkipsDirsAndUnknowns()
+    public async Task ApplyLayoutInfo_SetsFilesByFrn_SkipsDirsAndUnknowns()
     {
         var index = await BuildAsync(SampleTree);
 
-        long applied = index.ApplySizes([(12, 2048), (10, 999) /* dir */, (777, 1) /* unknown */]);
+        long applied = index.ApplyLayoutInfo(
+        [
+            new FileLayoutInfo(12, 2048, LastWriteFileTime: 131_000_000_000_000_000),
+            new FileLayoutInfo(10, 999, 1) /* dir */,
+            new FileLayoutInfo(777, 1, 1) /* unknown */,
+        ]);
 
         Assert.Equal(1, applied);
         Assert.True(index.TryGetNode(12, out var note));
         Assert.Equal(2048, note.SizeBytes);
+        Assert.Equal(131_000_000_000_000_000, note.LastWriteFileTime);
         Assert.True(index.TryGetNode(10, out var dir));
         Assert.Equal(0, dir.SizeBytes);
     }
@@ -141,7 +149,7 @@ public class VolumeIndexTests
         // C:\Users\benny\notes.txt (2048) + C:\Users\benny\Games\save.dat (100)
         var tree = SampleTree.Append(new FileNode(14, 13, "save.dat", 0, false)).ToList();
         var index = await BuildAsync(tree);
-        index.ApplySizes([(12, 2048), (14, 100)]);
+        index.ApplyLayoutInfo([new FileLayoutInfo(12, 2048, 0), new FileLayoutInfo(14, 100, 0)]);
 
         index.ComputeDirectorySizes();
 

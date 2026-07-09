@@ -16,4 +16,7 @@ public sealed record FileNode(
     bool IsDirectory)
 {
     public long SizeBytes { get; set; } = SizeBytes;
+
+    /// <summary>Last write time as FILETIME (100ns ticks since 1601 UTC); 0 = unknown. Mutable like SizeBytes.</summary>
+    public long LastWriteFileTime { get; set; }
 }

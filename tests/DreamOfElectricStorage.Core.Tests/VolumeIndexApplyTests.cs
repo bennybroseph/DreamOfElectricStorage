@@ -18,8 +18,9 @@ public class VolumeIndexApplyTests
 
     private static UsnChangeBatch Batch(params UsnJournalEntry[] entries) => new(entries, NextUsn: 100, RequiresRebuild: false);
 
-    private static readonly FileNode Docs = new(10, 5, "Docs", 0, IsDirectory: true);
-    private static readonly FileNode Note = new(11, 10, "note.txt", 0, IsDirectory: false);
+    // Properties, not static readonly — FileNode is partially mutable (see VolumeIndexTests.SampleTree).
+    private static FileNode Docs => new(10, 5, "Docs", 0, IsDirectory: true);
+    private static FileNode Note => new(11, 10, "note.txt", 0, IsDirectory: false);
 
     [Fact]
     public async Task Create_AddsNodeUnderParent()

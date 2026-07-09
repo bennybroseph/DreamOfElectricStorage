@@ -110,16 +110,17 @@ public sealed class VolumeIndex
             Journal = journal with { NextUsn = batch.NextUsn };
     }
 
-    /// <summary>Sets file sizes in place by FRN (bulk fill from FSCTL_QUERY_FILE_LAYOUT). Unknown FRNs no-op.</summary>
-    public long ApplySizes(IEnumerable<(ulong Frn, long SizeBytes)> sizes)
+    /// <summary>Sets file sizes + timestamps in place by FRN (bulk fill from FSCTL_QUERY_FILE_LAYOUT). Unknown FRNs no-op.</summary>
+    public long ApplyLayoutInfo(IEnumerable<FileLayoutInfo> entries)
     {
-        ArgumentNullException.ThrowIfNull(sizes);
+        ArgumentNullException.ThrowIfNull(entries);
         long applied = 0;
-        foreach ((ulong frn, long size) in sizes)
+        foreach (FileLayoutInfo info in entries)
         {
-            if (_nodesById.TryGetValue(frn, out FileNode? node) && !node.IsDirectory)
+            if (_nodesById.TryGetValue(info.Frn, out FileNode? node) && !node.IsDirectory)
             {
-                node.SizeBytes = size;
+                node.SizeBytes = info.SizeBytes;
+                node.LastWriteFileTime = info.LastWriteFileTime;
                 applied++;
             }
         }
@@ -218,6 +219,9 @@ public sealed class VolumeIndex
 
         return $@"{Volume}\{string.Join('\\', components)}";
     }
+
+    /// <summary>Every node in the snapshot (unordered). Same threading contract as all queries.</summary>
+    public IEnumerable<FileNode> AllNodes => _nodesById.Values;
 
     /// <summary>The N largest files (or directories, by rollup) on the volume.</summary>
     public IReadOnlyList<FileNode> TopBySize(int count, bool directories) =>

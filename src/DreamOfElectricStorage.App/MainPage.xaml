@@ -33,6 +33,8 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="320" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
@@ -56,23 +58,73 @@
                     </DataTemplate>
                 </AutoSuggestBox.ItemTemplate>
             </AutoSuggestBox>
-            <TextBlock x:Name="BreadcrumbText" Grid.Column="2" VerticalAlignment="Center"
+            <ComboBox x:Name="ColorModeCombo" Grid.Column="2" SelectedIndex="0"
+                      SelectionChanged="OnColorModeChanged" VerticalAlignment="Center">
+                <ComboBoxItem Content="Color: Type" />
+                <ComboBoxItem Content="Color: Age" />
+                <ComboBoxItem Content="Color: None" />
+            </ComboBox>
+            <ItemsControl x:Name="LegendItems" Grid.Column="3" VerticalAlignment="Center">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Orientation="Horizontal" Spacing="8" />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="local:LegendEntry">
+                        <StackPanel Orientation="Horizontal" Spacing="3">
+                            <Ellipse Width="9" Height="9" Fill="{x:Bind Brush}" VerticalAlignment="Center" />
+                            <TextBlock Text="{x:Bind Label}" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.75" />
+                        </StackPanel>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+            <TextBlock x:Name="BreadcrumbText" Grid.Column="4" VerticalAlignment="Center"
                        Style="{StaticResource BodyStrongTextBlockStyle}" Text="" TextTrimming="CharacterEllipsis" />
-            <TextBlock x:Name="StatusText" Grid.Column="3" VerticalAlignment="Center"
+            <TextBlock x:Name="StatusText" Grid.Column="5" VerticalAlignment="Center"
                        Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.8" Text="" />
         </Grid>
 
-        <canvas:CanvasControl
-            x:Name="GraphCanvas"
-            Grid.Row="2"
-            Draw="OnCanvasDraw"
-            ClearColor="#FF14181F"
-            PointerPressed="OnCanvasPointerPressed"
-            PointerMoved="OnCanvasPointerMoved"
-            PointerReleased="OnCanvasPointerReleased"
-            PointerWheelChanged="OnCanvasWheel"
-            Tapped="OnCanvasTapped"
-            DoubleTapped="OnCanvasDoubleTapped"
-            RightTapped="OnCanvasRightTapped" />
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <canvas:CanvasControl
+                x:Name="GraphCanvas"
+                Grid.Column="0"
+                Draw="OnCanvasDraw"
+                ClearColor="#FF14181F"
+                PointerPressed="OnCanvasPointerPressed"
+                PointerMoved="OnCanvasPointerMoved"
+                PointerReleased="OnCanvasPointerReleased"
+                PointerWheelChanged="OnCanvasWheel"
+                Tapped="OnCanvasTapped"
+                DoubleTapped="OnCanvasDoubleTapped"
+                RightTapped="OnCanvasRightTapped" />
+
+            <Grid x:Name="RelatedPanel" Grid.Column="1" Width="340" Visibility="Collapsed"
+                  Padding="12" RowSpacing="8" Background="{ThemeResource LayerFillColorDefaultBrush}">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <TextBlock x:Name="RelatedTitle" Grid.Row="0" Style="{StaticResource BodyStrongTextBlockStyle}" Text="Related" />
+                <TextBlock x:Name="RelatedSummary" Grid.Row="1" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.75" TextWrapping="Wrap" />
+                <ListView x:Name="RelatedList" Grid.Row="2" SelectionMode="None" IsItemClickEnabled="True" ItemClick="OnRelatedItemClick">
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="local:SearchResult">
+                            <StackPanel Padding="0,6">
+                                <TextBlock Text="{x:Bind Name}" Style="{StaticResource BodyTextBlockStyle}" />
+                                <TextBlock Text="{x:Bind Path}" Style="{StaticResource CaptionTextBlockStyle}"
+                                           Opacity="0.7" TextTrimming="CharacterEllipsis" />
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+            </Grid>
+        </Grid>
     </Grid>
 </Page>

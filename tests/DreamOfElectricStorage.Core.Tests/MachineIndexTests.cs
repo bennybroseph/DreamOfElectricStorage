@@ -79,6 +79,47 @@ public class MachineIndexTests
     }
 
     [Fact]
+    public async Task FindDuplicates_MatchesNameAndSizeAcrossVolumes_ExcludingSelf()
+    {
+        var indexer = new FakeDriveIndexer()
+            .Add("C:",
+                new FileNode(1, 5, "model.gguf", 100, false),
+                new FileNode(2, 5, "model.gguf", 999, false),   // same name, different size — not a dup
+                new FileNode(3, 5, "MODEL.GGUF", 100, false))   // case-insensitive dup
+            .Add("D:",
+                new FileNode(1, 5, "model.gguf", 100, false),   // dup on another volume (same FRN even)
+                new FileNode(9, 5, "other.bin", 100, false));
+
+        var machine = await MachineIndex.BuildAsync(indexer, ["C:", "D:"]);
+        var c = machine.Volumes.Single(v => v.Volume == "C:");
+        c.TryGetNode(1, out var source);
+
+        var dupes = machine.FindDuplicates(c, source);
+
+        Assert.Equal(2, dupes.Count);
+        Assert.Contains(dupes, d => d.Volume.Volume == "C:" && d.Node.Id == 3ul);
+        Assert.Contains(dupes, d => d.Volume.Volume == "D:" && d.Node.Id == 1ul);
+        Assert.DoesNotContain(dupes, d => d.Volume.Volume == "C:" && d.Node.Id == 1ul); // self excluded
+    }
+
+    [Fact]
+    public async Task FindDuplicates_DirectoriesAndZeroSize_ReturnEmpty()
+    {
+        var indexer = new FakeDriveIndexer()
+            .Add("C:",
+                new FileNode(1, 5, "Games", 100, true),
+                new FileNode(2, 5, "empty.txt", 0, false));
+
+        var machine = await MachineIndex.BuildAsync(indexer, ["C:"]);
+        var c = machine.Volumes.Single();
+        c.TryGetNode(1, out var dir);
+        c.TryGetNode(2, out var empty);
+
+        Assert.Empty(machine.FindDuplicates(c, dir));
+        Assert.Empty(machine.FindDuplicates(c, empty));
+    }
+
+    [Fact]
     public async Task Search_SpansVolumes()
     {
         var indexer = new FakeDriveIndexer()

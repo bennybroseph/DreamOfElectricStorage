@@ -10,6 +10,8 @@ using Windows.UI;
 
 namespace DreamOfElectricStorage.App;
 
+public enum GraphColorMode { Type, Age, None }
+
 /// <summary>
 /// Canvas-side state and logic for the node graph: current level, layout, camera,
 /// drawing, and hit-testing. MainPage owns the CanvasControl and forwards events here.
@@ -28,6 +30,35 @@ public sealed class GraphView
     private static readonly Color LabelColor = Color.FromArgb(255, 230, 234, 240);
     private static readonly Color EdgeColor = Color.FromArgb(60, 79, 209, 255);
     private static readonly Color HighlightColor = Color.FromArgb(255, 255, 196, 0);    // search-hit ring
+    private static readonly Color RelationColor = Color.FromArgb(255, 255, 123, 193);   // dup/similar glow
+    private static readonly Color DropTargetColor = Color.FromArgb(255, 123, 232, 123); // drag-move target ring
+
+    /// <summary>Type-mode palette. Order/labels surface in the legend.</summary>
+    public static readonly IReadOnlyList<(FileTypeCategory Category, string Label, Color Color)> TypePalette =
+    [
+        (FileTypeCategory.Image, "Images", Color.FromArgb(255, 123, 232, 123)),
+        (FileTypeCategory.Video, "Video", Color.FromArgb(255, 255, 169, 77)),
+        (FileTypeCategory.Audio, "Audio", Color.FromArgb(255, 183, 140, 255)),
+        (FileTypeCategory.Document, "Documents", Color.FromArgb(255, 255, 224, 102)),
+        (FileTypeCategory.Code, "Code", Color.FromArgb(255, 77, 212, 192)),
+        (FileTypeCategory.Archive, "Archives", Color.FromArgb(255, 201, 162, 39)),
+        (FileTypeCategory.Executable, "Executables", Color.FromArgb(255, 255, 107, 107)),
+        (FileTypeCategory.Model, "AI models", Color.FromArgb(255, 255, 123, 193)),
+        (FileTypeCategory.GameData, "Game data", Color.FromArgb(255, 107, 155, 255)),
+        (FileTypeCategory.System, "System", Color.FromArgb(255, 138, 143, 152)),
+        (FileTypeCategory.Other, "Other", Color.FromArgb(255, 181, 188, 201)),
+    ];
+
+    /// <summary>Age-mode ramp, hot→cold. Thresholds in days; -1 = unknown bucket.</summary>
+    public static readonly IReadOnlyList<(double MaxAgeDays, string Label, Color Color)> AgePalette =
+    [
+        (1, "Today", Color.FromArgb(255, 255, 107, 107)),
+        (7, "This week", Color.FromArgb(255, 255, 169, 77)),
+        (31, "This month", Color.FromArgb(255, 255, 224, 102)),
+        (366, "This year", Color.FromArgb(255, 77, 212, 192)),
+        (double.MaxValue, "Older", Color.FromArgb(255, 107, 114, 128)),
+        (-1, "Unknown", Color.FromArgb(255, 181, 188, 201)),
+    ];
 
     private static readonly CanvasTextFormat LabelFormat = new()
     {
@@ -44,6 +75,22 @@ public sealed class GraphView
     private MachineIndex? _machine;
     private readonly List<GraphNode> _nodes = [];
     private ulong? _highlightedFrn;
+
+    // Relationship reveal: selection is sticky, hover is transient; selection wins as anchor.
+    private ulong? _hoveredFrn;
+    private ulong? _selectedFrn;
+    private readonly HashSet<ulong> _relatedFrns = [];
+
+    // Drag-move: dragged node ghost + current directory drop target.
+    private NodeHit? _dragSource;
+    private Vector2 _dragGhostScreen;
+    private ulong? _dropTargetFrn;
+
+    public bool IsDragging => _dragSource is not null;
+
+    public GraphColorMode ColorMode { get; set; } = GraphColorMode.Type;
+
+    public ulong? SelectedFrn => _selectedFrn;
 
     // Navigation state: null volume = machine level (volumes as nodes).
     private VolumeIndex? _currentVolume;
@@ -116,11 +163,17 @@ public sealed class GraphView
         return null;
     }
 
-    /// <summary>Tap: drill into the volume/directory that was hit (files inert on single tap).</summary>
-    public void OnTapped(Vector2 screenPoint)
+    /// <summary>
+    /// Tap: drill into volumes/directories; select files (relationship reveal).
+    /// Returns the hit when a file was selected, null otherwise.
+    /// </summary>
+    public NodeHit? OnTapped(Vector2 screenPoint)
     {
         if (TryGetNodeAt(screenPoint) is not { } hit)
-            return;
+        {
+            ClearSelection();
+            return null;
+        }
 
         _highlightedFrn = null;
         if (hit.IsVolumeNode)
@@ -134,10 +187,104 @@ public sealed class GraphView
         }
         else
         {
-            return;
+            _selectedFrn = hit.File.Id;
+            RecomputeRelated();
+            return hit;
         }
 
         RebuildLevel();
+        return null;
+    }
+
+    public void ClearSelection()
+    {
+        _selectedFrn = null;
+        RecomputeRelated();
+    }
+
+    /// <summary>Starts a node drag if the point hits a draggable node (not a volume). Returns success.</summary>
+    public bool BeginDrag(Vector2 screenPoint)
+    {
+        if (TryGetNodeAt(screenPoint) is not { IsVolumeNode: false } hit)
+            return false;
+
+        _dragSource = hit;
+        _dragGhostScreen = screenPoint;
+        _dropTargetFrn = null;
+        return true;
+    }
+
+    /// <summary>Updates the ghost position and the directory drop target under the cursor.</summary>
+    public void UpdateDrag(Vector2 screenPoint)
+    {
+        if (_dragSource is not { } source)
+            return;
+
+        _dragGhostScreen = screenPoint;
+        _dropTargetFrn = TryGetNodeAt(screenPoint) is { IsVolumeNode: false } hit
+            && hit.File.IsDirectory
+            && hit.File.Id != source.File.Id
+                ? hit.File.Id
+                : null;
+    }
+
+    /// <summary>Ends the drag; returns (source, target) when released over a valid directory.</summary>
+    public (NodeHit Source, NodeHit Target)? EndDrag()
+    {
+        (NodeHit, NodeHit)? result = null;
+        if (_dragSource is { } source && _dropTargetFrn is { } targetFrn
+            && _currentVolume is { } volume && volume.TryGetNode(targetFrn, out FileNode target))
+        {
+            result = (source, new NodeHit(volume, target, IsVolumeNode: false));
+        }
+
+        _dragSource = null;
+        _dropTargetFrn = null;
+        return result;
+    }
+
+    public void CancelDrag()
+    {
+        _dragSource = null;
+        _dropTargetFrn = null;
+    }
+
+    /// <summary>Transient hover reveal. Returns true when the visual state changed.</summary>
+    public bool SetHover(Vector2 screenPoint)
+    {
+        ulong? frn = TryGetNodeAt(screenPoint) is { IsVolumeNode: false } hit ? hit.File.Id : null;
+        if (frn == _hoveredFrn)
+            return false;
+
+        _hoveredFrn = frn;
+        RecomputeRelated();
+        return true;
+    }
+
+    /// <summary>Visible-level relatives of the anchor (selected wins over hovered): duplicates or similar names.</summary>
+    private void RecomputeRelated()
+    {
+        _relatedFrns.Clear();
+        ulong? anchorFrn = _selectedFrn ?? _hoveredFrn;
+        if (anchorFrn is not { } frn)
+            return;
+
+        FileNode? anchor = _nodes.FirstOrDefault(n => n.File.Id == frn).File;
+        if (anchor is null)
+            return;
+
+        foreach (GraphNode node in _nodes)
+        {
+            if (node.File.Id == frn)
+                continue;
+
+            bool duplicate = !node.File.IsDirectory && !anchor.IsDirectory
+                && node.File.SizeBytes > 0 && node.File.SizeBytes == anchor.SizeBytes
+                && string.Equals(node.File.Name, anchor.Name, StringComparison.OrdinalIgnoreCase);
+
+            if (duplicate || NameStem.AreSimilar(anchor.Name, node.File.Name))
+                _relatedFrns.Add(node.File.Id);
+        }
     }
 
     /// <summary>
@@ -209,6 +356,9 @@ public sealed class GraphView
     private void RebuildLevel(bool resetCamera = true)
     {
         _nodes.Clear();
+        _hoveredFrn = null;
+        _selectedFrn = null;
+        _relatedFrns.Clear();
         if (_machine is null)
             return;
 
@@ -284,18 +434,41 @@ public sealed class GraphView
     {
         _lastViewport = new Vector2((float)canvas.ActualWidth, (float)canvas.ActualHeight);
         session.Transform = Matrix3x2.CreateScale(_zoom) * Matrix3x2.CreateTranslation(_pan);
+        long nowFileTime = DateTime.UtcNow.ToFileTimeUtc();
 
         // Edges: every node back to the level's center (hierarchy spokes).
         foreach (GraphNode node in _nodes)
             session.DrawLine(Vector2.Zero, node.Position, EdgeColor, 1.5f / _zoom);
 
+        // Relation edges: anchor → each visible relative, above spokes, below nodes.
+        ulong? anchorFrn = _selectedFrn ?? _hoveredFrn;
+        Vector2? anchorPos = null;
+        if (anchorFrn is { } af && _nodes.FirstOrDefault(n => n.File.Id == af) is { File: not null } anchorNode)
+            anchorPos = anchorNode.Position;
+        if (anchorPos is { } anchor && _relatedFrns.Count > 0)
+        {
+            foreach (GraphNode node in _nodes)
+            {
+                if (_relatedFrns.Contains(node.File.Id))
+                    session.DrawLine(anchor, node.Position, RelationColor, 2.5f / _zoom);
+            }
+        }
+
         foreach (GraphNode node in _nodes)
         {
-            Color fill = node.File.IsDirectory ? DirectoryColor : FileColor;
-            session.FillCircle(node.Position, node.Radius, fill);
+            session.FillCircle(node.Position, node.Radius, ResolveColor(node.File, nowFileTime));
 
             if (_highlightedFrn == node.File.Id && _currentVolume is not null)
                 session.DrawCircle(node.Position, node.Radius + 6, HighlightColor, 3f / _zoom);
+
+            if (node.File.Id == anchorFrn)
+                session.DrawCircle(node.Position, node.Radius + 4,
+                    RelationColor, (_selectedFrn is not null ? 3f : 1.5f) / _zoom);
+            else if (_relatedFrns.Contains(node.File.Id))
+                session.DrawCircle(node.Position, node.Radius + 4, RelationColor, 2f / _zoom);
+
+            if (_dropTargetFrn == node.File.Id)
+                session.DrawCircle(node.Position, node.Radius + 8, DropTargetColor, 4f / _zoom);
 
             if (node.Radius * _zoom >= LabelMinScreenRadius)
             {
@@ -305,6 +478,48 @@ public sealed class GraphView
                     LabelColor,
                     LabelFormat);
             }
+        }
+
+        // Drag ghost rides in screen space above everything.
+        if (_dragSource is { } drag)
+        {
+            session.Transform = Matrix3x2.Identity;
+            Color ghost = Color.FromArgb(140, DirectoryColor.R, DirectoryColor.G, DirectoryColor.B);
+            session.FillCircle(_dragGhostScreen, 14, ghost);
+            session.DrawText(drag.File.Name, _dragGhostScreen + new Vector2(0, 18), LabelColor, LabelFormat);
+        }
+    }
+
+    private Color ResolveColor(FileNode file, long nowFileTime)
+    {
+        if (file.IsDirectory)
+            return DirectoryColor;
+
+        switch (ColorMode)
+        {
+            case GraphColorMode.Type:
+                FileTypeCategory category = FileTypeClassifier.Classify(file.Name);
+                foreach (var (cat, _, color) in TypePalette)
+                {
+                    if (cat == category)
+                        return color;
+                }
+                return FileColor;
+
+            case GraphColorMode.Age when file.LastWriteFileTime > 0:
+                double ageDays = (nowFileTime - file.LastWriteFileTime) / (double)TimeSpan.TicksPerDay;
+                foreach (var (maxDays, _, color) in AgePalette)
+                {
+                    if (maxDays >= 0 && ageDays <= maxDays)
+                        return color;
+                }
+                return AgePalette[^2].Color; // Older
+
+            case GraphColorMode.Age:
+                return AgePalette[^1].Color; // Unknown
+
+            default:
+                return FileColor;
         }
     }
 }

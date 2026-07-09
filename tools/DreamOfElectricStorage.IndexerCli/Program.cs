@@ -10,15 +10,59 @@ using DreamOfElectricStorage.Core;
 return args switch
 {
     ["watch"] => await RunWatchAsync(),
+    ["dupes"] => await RunDupesAsync(),
     ["index", .. var rest] when rest.Length <= 1 => await RunIndexAsync(rest.Length == 1 ? rest[0] : "benny"),
-    [var volume] => await RunEnumerateAsync(volume),
+    [var volume] when volume != "dupes" => await RunEnumerateAsync(volume),
     _ => Usage(),
 };
 
 static int Usage()
 {
-    Console.Error.WriteLine("Usage: IndexerCli <volume> | IndexerCli index [search-term] | IndexerCli watch");
+    Console.Error.WriteLine("Usage: IndexerCli <volume> | IndexerCli index [search-term] | IndexerCli watch | IndexerCli dupes");
     return 2;
+}
+
+static async Task<int> RunDupesAsync()
+{
+    MachineIndex machine;
+    try
+    {
+        Console.WriteLine("building machine index...");
+        machine = await MachineIndex.BuildAsync(new NtfsDriveIndexer());
+    }
+    catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+    {
+        Console.Error.WriteLine($"error: {ex.Message}");
+        return 1;
+    }
+
+    var sw = System.Diagnostics.Stopwatch.StartNew();
+
+    // Machine-wide (name-ci, size) group-by; groups of 2+ are duplicate candidates.
+    var groups = machine.Volumes
+        .SelectMany(v => v.AllNodes.Where(n => !n.IsDirectory && n.SizeBytes > 0).Select(n => (Volume: v, Node: n)))
+        .GroupBy(e => (Name: e.Node.Name.ToLowerInvariant(), e.Node.SizeBytes))
+        .Where(g => g.Count() > 1)
+        .Select(g => (Entries: g.ToList(), WastedBytes: (g.Count() - 1) * g.Key.SizeBytes))
+        .OrderByDescending(g => g.WastedBytes)
+        .Take(20)
+        .ToList();
+
+    sw.Stop();
+    long totalWasted = groups.Sum(g => g.WastedBytes);
+    Console.WriteLine($"top {groups.Count} duplicate groups ({sw.Elapsed.TotalSeconds:F1}s scan), ≥{totalWasted / (double)(1L << 30):F1} GB reclaimable in these alone:");
+    Console.WriteLine();
+
+    foreach (var (entries, wasted) in groups)
+    {
+        Console.WriteLine($"{wasted / (double)(1L << 30):F2} GB wasted — {entries.Count}x \"{entries[0].Node.Name}\" ({entries[0].Node.SizeBytes / (double)(1L << 20):F1} MB each)");
+        foreach (var (volume, node) in entries.Take(5))
+            Console.WriteLine($"    {volume.GetPath(node.Id)}");
+        if (entries.Count > 5)
+            Console.WriteLine($"    ... and {entries.Count - 5} more");
+    }
+
+    return 0;
 }
 
 static async Task<int> RunEnumerateAsync(string volume)
