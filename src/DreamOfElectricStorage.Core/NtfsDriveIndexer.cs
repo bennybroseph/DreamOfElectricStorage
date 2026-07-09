@@ -19,14 +19,14 @@ public sealed class NtfsDriveIndexer : IDriveIndexer
     public IAsyncEnumerable<FileNode> EnumerateAsync(string volume, CancellationToken cancellationToken = default)
     {
         // Validate eagerly so bad arguments throw at call time, not first MoveNextAsync.
-        string volumePath = NormalizeVolume(volume);
+        string volumePath = VolumeHandles.Normalize(volume);
         return EnumerateCoreAsync(volumePath, cancellationToken);
     }
 
     private static async IAsyncEnumerable<FileNode> EnumerateCoreAsync(
         string volumePath, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        using SafeFileHandle volumeHandle = OpenVolume(volumePath);
+        using SafeFileHandle volumeHandle = VolumeHandles.Open(volumePath);
 
         var enumData = new MFT_ENUM_DATA_V0
         {
@@ -88,42 +88,4 @@ public sealed class NtfsDriveIndexer : IDriveIndexer
         };
     }
 
-    private static SafeFileHandle OpenVolume(string volumePath)
-    {
-        SafeFileHandle handle = PInvoke.CreateFile(
-            volumePath,
-            (uint)GENERIC_ACCESS_RIGHTS.GENERIC_READ,
-            FILE_SHARE_MODE.FILE_SHARE_READ | FILE_SHARE_MODE.FILE_SHARE_WRITE,
-            lpSecurityAttributes: null,
-            FILE_CREATION_DISPOSITION.OPEN_EXISTING,
-            dwFlagsAndAttributes: 0,
-            hTemplateFile: null);
-
-        if (!handle.IsInvalid)
-            return handle;
-
-        var error = (WIN32_ERROR)Marshal.GetLastPInvokeError();
-        handle.Dispose();
-        throw error switch
-        {
-            WIN32_ERROR.ERROR_ACCESS_DENIED => new UnauthorizedAccessException(
-                $"Access to {volumePath} was denied. MFT enumeration requires an elevated (administrator) process."),
-            _ => new IOException($"Failed to open volume {volumePath} (Win32 error {(uint)error})."),
-        };
-    }
-
-    /// <summary>Accepts "C", "C:", or "C:\" (any case) and yields the raw volume path \\.\C:.</summary>
-    private static string NormalizeVolume(string volume)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(volume);
-
-        string trimmed = volume.TrimEnd('\\', '/');
-        if (trimmed.Length == 2 && trimmed[1] == ':')
-            trimmed = trimmed[..1];
-
-        if (trimmed.Length != 1 || !char.IsAsciiLetter(trimmed[0]))
-            throw new ArgumentException($"'{volume}' is not a drive letter (expected e.g. \"C:\").", nameof(volume));
-
-        return $@"\\.\{char.ToUpperInvariant(trimmed[0])}:";
-    }
 }

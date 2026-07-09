@@ -39,8 +39,13 @@ public sealed class MachineIndex
         {
             try
             {
+                // Journal identity is captured BEFORE enumerating: changes that land during
+                // the build get replayed by the watcher (Apply is idempotent enough — upserts
+                // and removes converge), so nothing falls in the gap.
+                JournalState? journal = TryQueryJournal(volume);
+
                 return await VolumeIndex
-                    .BuildAsync(volume, indexer.EnumerateAsync(volume, cancellationToken), cancellationToken, progress)
+                    .BuildAsync(volume, indexer.EnumerateAsync(volume, cancellationToken), cancellationToken, progress, journal)
                     .ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is NotSupportedException or IOException)
@@ -60,6 +65,35 @@ public sealed class MachineIndex
     /// <summary>Case-insensitive substring search across every indexed volume.</summary>
     public IEnumerable<(VolumeIndex Volume, FileNode Node)> Search(string substring) =>
         Volumes.SelectMany(volume => volume.Search(substring).Select(node => (volume, node)));
+
+    /// <summary>
+    /// Streams journal change batches for one indexed volume, starting from the state
+    /// captured at build time. Consumer applies each batch via <see cref="VolumeIndex.Apply"/>
+    /// on the thread that owns the index. A RequiresRebuild batch ends the stream —
+    /// rebuild the machine index and watch again.
+    /// </summary>
+    public IAsyncEnumerable<UsnChangeBatch> Watch(VolumeIndex volume, CancellationToken cancellationToken = default)
+    {
+        if (volume.Journal is not { } journal)
+            throw new InvalidOperationException($"{volume.Volume} was built without journal state; cannot watch.");
+
+        return new UsnJournalWatcher().WatchAsync(volume.Volume, journal, cancellationToken);
+    }
+
+    private static JournalState? TryQueryJournal(string volume)
+    {
+        try
+        {
+            return UsnJournalWatcher.QueryJournal(volume);
+        }
+        catch (Exception ex) when (ex is NotSupportedException or IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            // Index still builds; the volume just won't be watchable. Elevation problems
+            // surface fatally from enumeration itself (real indexer), not from here —
+            // this also keeps fake-indexer test volumes from touching real drives fatally.
+            return null;
+        }
+    }
 
     private static List<string> DiscoverVolumes(List<SkippedVolume> skipped)
     {

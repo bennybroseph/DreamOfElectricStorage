@@ -47,8 +47,15 @@ public sealed partial class MainPage : Page
         return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
     }
 
+    private CancellationTokenSource? _watchCts;
+    private long _liveChanges;
+
     private async Task BuildIndexAsync()
     {
+        // Stop watchers from any previous build (journal-overflow rebuild path).
+        _watchCts?.Cancel();
+        _watchCts = new CancellationTokenSource();
+
         StatusText.Text = "indexing…";
         var stopwatch = Stopwatch.StartNew();
 
@@ -69,6 +76,10 @@ public sealed partial class MainPage : Page
             StatusText.Text = $"{machine.TotalCount:N0} nodes / {machine.Volumes.Count} volumes in {stopwatch.Elapsed.TotalSeconds:F1}s{skipped}";
 
             _graph.SetIndex(machine);
+
+            _liveChanges = 0;
+            foreach (VolumeIndex volume in machine.Volumes.Where(v => v.Journal is not null))
+                _ = WatchVolumeAsync(machine, volume, _watchCts.Token);
         }
         catch (UnauthorizedAccessException)
         {
@@ -78,6 +89,51 @@ public sealed partial class MainPage : Page
         catch (Exception ex)
         {
             StatusText.Text = $"indexing failed: {ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// Pumps one volume's journal. Batches are applied on the UI thread — the sole
+    /// owner of the index (VolumeIndex is single-writer by contract).
+    /// </summary>
+    private async Task WatchVolumeAsync(MachineIndex machine, VolumeIndex volume, CancellationToken ct)
+    {
+        try
+        {
+            await foreach (UsnChangeBatch batch in machine.Watch(volume, ct))
+            {
+                if (batch.RequiresRebuild)
+                {
+                    DispatcherQueue.TryEnqueue(async () =>
+                    {
+                        StatusText.Text = $"{volume.Volume} journal overflow — rebuilding index…";
+                        await BuildIndexAsync();
+                    });
+                    return;
+                }
+
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    volume.Apply(batch);
+                    _liveChanges += batch.Entries.Count;
+                    StatusText.Text = $"live — {_liveChanges:N0} changes";
+
+                    // Refresh the visible level only when it could be affected.
+                    bool visibleTouched = _graph.CurrentVolume == volume &&
+                        batch.Entries.Any(e => e.Node.ParentId == _graph.CurrentParentId ||
+                                               (_graph.CurrentParentId == VolumeIndex.SyntheticRootId && !volume.TryGetNode(e.Node.ParentId, out _)));
+                    if (visibleTouched)
+                        _graph.RefreshLevel();
+                });
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // watcher stopped (rebuild or shutdown)
+        }
+        catch (Exception ex)
+        {
+            DispatcherQueue.TryEnqueue(() => StatusText.Text = $"{volume.Volume} watcher stopped: {ex.Message}");
         }
     }
 

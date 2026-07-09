@@ -1,8 +1,19 @@
 namespace DreamOfElectricStorage.Core;
 
+/// <summary>USN_REASON_* flags relevant to index maintenance (values from Windows metadata).</summary>
+public static class UsnReasons
+{
+    public const uint FileCreate = Windows.Win32.PInvoke.USN_REASON_FILE_CREATE;
+    public const uint FileDelete = Windows.Win32.PInvoke.USN_REASON_FILE_DELETE;
+    public const uint RenameOldName = Windows.Win32.PInvoke.USN_REASON_RENAME_OLD_NAME;
+    public const uint RenameNewName = Windows.Win32.PInvoke.USN_REASON_RENAME_NEW_NAME;
+}
+
 /// <summary>
 /// Queryable in-memory snapshot of one volume's file hierarchy, built from an
-/// indexer stream. Immutable after build — safe for concurrent reads.
+/// indexer stream and kept fresh via <see cref="Apply"/>.
+/// NOT thread-safe: the index owner must serialize all reads and writes
+/// (the WinUI app owns it on the dispatcher thread; the CLI on its main loop).
 /// </summary>
 public sealed class VolumeIndex
 {
@@ -28,6 +39,12 @@ public sealed class VolumeIndex
     /// <summary>Drive designator this index covers, e.g. "C:".</summary>
     public string Volume { get; }
 
+    /// <summary>
+    /// Journal identity captured before the enumeration this index was built from;
+    /// NextUsn advances as change batches are applied. Null when built without watch state.
+    /// </summary>
+    public JournalState? Journal { get; private set; }
+
     public int Count => _nodesById.Count;
 
     /// <summary>Nodes attached directly under the volume root.</summary>
@@ -37,7 +54,8 @@ public sealed class VolumeIndex
         string volume,
         IAsyncEnumerable<FileNode> nodes,
         CancellationToken cancellationToken = default,
-        IProgress<VolumeIndexProgress>? progress = null)
+        IProgress<VolumeIndexProgress>? progress = null,
+        JournalState? journal = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(volume);
         ArgumentNullException.ThrowIfNull(nodes);
@@ -68,7 +86,75 @@ public sealed class VolumeIndex
         }
 
         progress?.Report(new VolumeIndexProgress(normalizedVolume, nodesById.Count, Completed: true));
-        return new VolumeIndex(normalizedVolume, nodesById, childrenByParent);
+        return new VolumeIndex(normalizedVolume, nodesById, childrenByParent) { Journal = journal };
+    }
+
+    /// <summary>
+    /// Applies one journal change batch. Remove-type reasons (delete, rename-old) win over
+    /// add-type ones within a record because USN reason flags are cumulative per file-open:
+    /// e.g. a created-then-deleted temp file's final record carries CREATE|DELETE.
+    /// </summary>
+    public void Apply(UsnChangeBatch batch)
+    {
+        ArgumentNullException.ThrowIfNull(batch);
+
+        foreach (UsnJournalEntry entry in batch.Entries)
+        {
+            if ((entry.Reason & (UsnReasons.FileDelete | UsnReasons.RenameOldName)) != 0)
+                Remove(entry.Node.Id);
+            else if ((entry.Reason & (UsnReasons.FileCreate | UsnReasons.RenameNewName)) != 0)
+                Upsert(entry.Node);
+        }
+
+        if (Journal is { } journal && batch.NextUsn > 0)
+            Journal = journal with { NextUsn = batch.NextUsn };
+    }
+
+    private void Remove(ulong id)
+    {
+        if (!_nodesById.Remove(id, out FileNode? node))
+            return;
+
+        DetachFromParent(node);
+
+        // A removed dir's children list stays keyed under its FRN on purpose:
+        // a rename pair (OLD removes, NEW re-adds the same FRN) reattaches them for free,
+        // and a true delete drains them via the children's own delete records
+        // (NTFS never deletes a non-empty directory).
+    }
+
+    private void Upsert(FileNode node)
+    {
+        if (_nodesById.TryGetValue(node.Id, out FileNode? existing))
+            DetachFromParent(existing);
+
+        _nodesById[node.Id] = node;
+        GetOrAddChildList(ResolveParentKey(node)).Add(node);
+    }
+
+    /// <summary>
+    /// Removes the node from whichever child list actually holds it. The resolved parent
+    /// key can drift after the node was inserted (its parent may since have been removed),
+    /// so fall back from the resolved key to the raw ParentId to the synthetic root.
+    /// </summary>
+    private void DetachFromParent(FileNode node)
+    {
+        if (TryDetach(ResolveParentKey(node), node) || TryDetach(node.ParentId, node))
+            return;
+        TryDetach(SyntheticRootId, node);
+
+        bool TryDetach(ulong parentKey, FileNode child) =>
+            _childrenByParent.TryGetValue(parentKey, out List<FileNode>? siblings) && siblings.Remove(child);
+    }
+
+    private ulong ResolveParentKey(FileNode node) =>
+        node.ParentId != node.Id && _nodesById.ContainsKey(node.ParentId) ? node.ParentId : SyntheticRootId;
+
+    private List<FileNode> GetOrAddChildList(ulong parentId)
+    {
+        if (!_childrenByParent.TryGetValue(parentId, out List<FileNode>? children))
+            _childrenByParent[parentId] = children = [];
+        return children;
     }
 
     public bool TryGetNode(ulong id, out FileNode node) => _nodesById.TryGetValue(id, out node!);

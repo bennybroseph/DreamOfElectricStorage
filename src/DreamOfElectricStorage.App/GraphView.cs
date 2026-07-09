@@ -75,6 +75,15 @@ public sealed class GraphView
 
     // --- navigation ---
 
+    /// <summary>FRN whose children are currently displayed, or null at machine/root level.</summary>
+    public ulong? CurrentParentId => _currentVolume is null ? null
+        : _parentTrail.Count == 0 ? VolumeIndex.SyntheticRootId : _parentTrail.Peek();
+
+    public VolumeIndex? CurrentVolume => _currentVolume;
+
+    /// <summary>Re-pulls the current level from the (mutated) index, keeping the camera still.</summary>
+    public void RefreshLevel() => RebuildLevel(resetCamera: false);
+
     public void GoUp()
     {
         if (_currentVolume is null)
@@ -147,7 +156,7 @@ public sealed class GraphView
 
     // --- level building ---
 
-    private void RebuildLevel()
+    private void RebuildLevel(bool resetCamera = true)
     {
         _nodes.Clear();
         if (_machine is null)
@@ -186,7 +195,8 @@ public sealed class GraphView
             }
         }
 
-        ResetCamera(_lastViewport);
+        if (resetCamera)
+            ResetCamera(_lastViewport);
         LevelChanged?.Invoke();
     }
 

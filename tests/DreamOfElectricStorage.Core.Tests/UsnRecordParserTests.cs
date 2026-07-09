@@ -127,6 +127,51 @@ public class UsnRecordParserTests
         Assert.Empty(nodes);
     }
 
+    // --- journal chunk parsing (same layout, Reason populated) ---
+
+    [Fact]
+    public void JournalChunk_ParsesReasonAndNextUsn()
+    {
+        byte[] record = Record(7, 5, "made.txt");
+        BinaryPrimitives.WriteUInt32LittleEndian(record.AsSpan(40), UsnReasons.FileCreate); // Reason @40
+        byte[] chunk = Chunk(nextStartFrn: 987654, record);
+
+        var entries = new List<UsnJournalEntry>();
+        long nextUsn = UsnRecordParser.ParseJournalChunk(chunk, entries);
+
+        Assert.Equal(987654, nextUsn);
+        var entry = Assert.Single(entries);
+        Assert.Equal("made.txt", entry.Node.Name);
+        Assert.Equal(UsnReasons.FileCreate, entry.Reason);
+    }
+
+    [Fact]
+    public void JournalChunk_MixedReasons_AllParsedInOrder()
+    {
+        byte[] created = Record(1, 5, "a.txt");
+        BinaryPrimitives.WriteUInt32LittleEndian(created.AsSpan(40), UsnReasons.FileCreate);
+        byte[] deleted = Record(2, 5, "b.txt");
+        BinaryPrimitives.WriteUInt32LittleEndian(deleted.AsSpan(40), UsnReasons.FileDelete | UsnReasons.FileCreate);
+
+        var entries = new List<UsnJournalEntry>();
+        UsnRecordParser.ParseJournalChunk(Chunk(1, created, deleted), entries);
+
+        Assert.Equal(2, entries.Count);
+        Assert.Equal(UsnReasons.FileCreate, entries[0].Reason);
+        Assert.Equal(UsnReasons.FileDelete | UsnReasons.FileCreate, entries[1].Reason);
+    }
+
+    [Fact]
+    public void JournalChunk_HeaderOnly_ReturnsNextUsnNoEntries()
+    {
+        byte[] chunk = new byte[8];
+        BinaryPrimitives.WriteUInt64LittleEndian(chunk, 42);
+
+        var entries = new List<UsnJournalEntry>();
+        Assert.Equal(42, UsnRecordParser.ParseJournalChunk(chunk, entries));
+        Assert.Empty(entries);
+    }
+
     // --- test buffer builders (layout per MS-FSCC 2.3.62.2) ---
 
     /// <summary>Builds a USN_RECORD_V2 byte image with the name placed at offset 60.</summary>
