@@ -1,0 +1,8 @@
+// CsWin32 source-generator manifest — one Win32 API name per line.
+CreateFileW
+DeviceIoControl
+FSCTL_ENUM_USN_DATA
+MFT_ENUM_DATA_V0
+GENERIC_ACCESS_RIGHTS
+FILE_FLAGS_AND_ATTRIBUTES
+WIN32_ERROR
