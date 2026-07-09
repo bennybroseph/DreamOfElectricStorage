@@ -110,6 +110,46 @@ public sealed class VolumeIndex
             Journal = journal with { NextUsn = batch.NextUsn };
     }
 
+    /// <summary>Sets file sizes in place by FRN (bulk fill from FSCTL_QUERY_FILE_LAYOUT). Unknown FRNs no-op.</summary>
+    public long ApplySizes(IEnumerable<(ulong Frn, long SizeBytes)> sizes)
+    {
+        ArgumentNullException.ThrowIfNull(sizes);
+        long applied = 0;
+        foreach ((ulong frn, long size) in sizes)
+        {
+            if (_nodesById.TryGetValue(frn, out FileNode? node) && !node.IsDirectory)
+            {
+                node.SizeBytes = size;
+                applied++;
+            }
+        }
+        return applied;
+    }
+
+    /// <summary>
+    /// Rolls up subtree totals into every directory's SizeBytes via DFS over the adjacency.
+    /// One-shot after a size fill; not maintained live (drift until next rebuild is accepted).
+    /// </summary>
+    public void ComputeDirectorySizes()
+    {
+        SumChildren(SyntheticRootId, depth: 0);
+
+        long SumChildren(ulong parentId, int depth)
+        {
+            if (depth > MaxPathDepth || !_childrenByParent.TryGetValue(parentId, out List<FileNode>? children))
+                return 0; // depth guard mirrors GetPath's cycle protection
+
+            long total = 0;
+            foreach (FileNode child in children)
+            {
+                if (child.IsDirectory)
+                    child.SizeBytes = SumChildren(child.Id, depth + 1);
+                total += child.SizeBytes;
+            }
+            return total;
+        }
+    }
+
     private void Remove(ulong id)
     {
         if (!_nodesById.Remove(id, out FileNode? node))
@@ -178,6 +218,13 @@ public sealed class VolumeIndex
 
         return $@"{Volume}\{string.Join('\\', components)}";
     }
+
+    /// <summary>The N largest files (or directories, by rollup) on the volume.</summary>
+    public IReadOnlyList<FileNode> TopBySize(int count, bool directories) =>
+        [.. _nodesById.Values
+            .Where(n => n.IsDirectory == directories && n.SizeBytes > 0)
+            .OrderByDescending(n => n.SizeBytes)
+            .Take(count)];
 
     /// <summary>Case-insensitive substring search over names. Lazy linear scan.</summary>
     public IEnumerable<FileNode> Search(string substring)

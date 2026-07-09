@@ -32,13 +32,33 @@
         <Grid Grid.Row="1" Padding="12,8" ColumnSpacing="12">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="320" />
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <Button x:Name="UpButton" Grid.Column="0" Content="&#x2191; Up" IsEnabled="False" Click="OnUpClick" />
-            <TextBlock x:Name="BreadcrumbText" Grid.Column="1" VerticalAlignment="Center"
+            <AutoSuggestBox
+                x:Name="SearchBox"
+                Grid.Column="1"
+                PlaceholderText="Search all drives…"
+                QueryIcon="Find"
+                IsEnabled="False"
+                TextChanged="OnSearchTextChanged"
+                SuggestionChosen="OnSearchSuggestionChosen"
+                QuerySubmitted="OnSearchQuerySubmitted">
+                <AutoSuggestBox.ItemTemplate>
+                    <DataTemplate x:DataType="local:SearchResult">
+                        <StackPanel Padding="0,6">
+                            <TextBlock Text="{x:Bind Name}" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock Text="{x:Bind Path}" Style="{StaticResource CaptionTextBlockStyle}"
+                                       Opacity="0.7" TextTrimming="CharacterEllipsis" />
+                        </StackPanel>
+                    </DataTemplate>
+                </AutoSuggestBox.ItemTemplate>
+            </AutoSuggestBox>
+            <TextBlock x:Name="BreadcrumbText" Grid.Column="2" VerticalAlignment="Center"
                        Style="{StaticResource BodyStrongTextBlockStyle}" Text="" TextTrimming="CharacterEllipsis" />
-            <TextBlock x:Name="StatusText" Grid.Column="2" VerticalAlignment="Center"
+            <TextBlock x:Name="StatusText" Grid.Column="3" VerticalAlignment="Center"
                        Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.8" Text="" />
         </Grid>
 
@@ -51,6 +71,8 @@
             PointerMoved="OnCanvasPointerMoved"
             PointerReleased="OnCanvasPointerReleased"
             PointerWheelChanged="OnCanvasWheel"
-            Tapped="OnCanvasTapped" />
+            Tapped="OnCanvasTapped"
+            DoubleTapped="OnCanvasDoubleTapped"
+            RightTapped="OnCanvasRightTapped" />
     </Grid>
 </Page>

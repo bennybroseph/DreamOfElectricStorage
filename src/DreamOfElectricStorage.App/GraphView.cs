@@ -27,6 +27,7 @@ public sealed class GraphView
     private static readonly Color FileColor = Color.FromArgb(255, 148, 155, 170);
     private static readonly Color LabelColor = Color.FromArgb(255, 230, 234, 240);
     private static readonly Color EdgeColor = Color.FromArgb(60, 79, 209, 255);
+    private static readonly Color HighlightColor = Color.FromArgb(255, 255, 196, 0);    // search-hit ring
 
     private static readonly CanvasTextFormat LabelFormat = new()
     {
@@ -37,8 +38,12 @@ public sealed class GraphView
 
     private readonly record struct GraphNode(FileNode File, VolumeIndex Volume, Vector2 Position, float Radius, string Label);
 
+    /// <summary>A node the pointer landed on. IsVolumeNode = machine-level drive circle (no real FRN).</summary>
+    public readonly record struct NodeHit(VolumeIndex Volume, FileNode File, bool IsVolumeNode);
+
     private MachineIndex? _machine;
     private readonly List<GraphNode> _nodes = [];
+    private ulong? _highlightedFrn;
 
     // Navigation state: null volume = machine level (volumes as nodes).
     private VolumeIndex? _currentVolume;
@@ -89,6 +94,8 @@ public sealed class GraphView
         if (_currentVolume is null)
             return;
 
+        _highlightedFrn = null;
+
         if (_parentTrail.Count == 0)
             _currentVolume = null; // back to machine level
         else
@@ -96,33 +103,76 @@ public sealed class GraphView
         RebuildLevel();
     }
 
-    /// <summary>Hit-test a screen point; drills into the volume/directory if one was hit.</summary>
-    public void OnTapped(Vector2 screenPoint)
+    /// <summary>Hit-tests a screen point against the current level's nodes.</summary>
+    public NodeHit? TryGetNodeAt(Vector2 screenPoint)
     {
         Vector2 world = (screenPoint - _pan) / _zoom;
         // Nodes are laid out sparsely; linear nearest-hit is fine at level sizes.
         foreach (GraphNode node in _nodes)
         {
-            if (Vector2.DistanceSquared(world, node.Position) > node.Radius * node.Radius)
-                continue;
+            if (Vector2.DistanceSquared(world, node.Position) <= node.Radius * node.Radius)
+                return new NodeHit(node.Volume, node.File, IsVolumeNode: _currentVolume is null);
+        }
+        return null;
+    }
 
-            if (_currentVolume is null)
-            {
-                _currentVolume = node.Volume;
-                _parentTrail.Clear();
-            }
-            else if (node.File.IsDirectory)
-            {
-                _parentTrail.Push(node.File.Id);
-            }
-            else
-            {
-                return; // file click: no action this slice
-            }
+    /// <summary>Tap: drill into the volume/directory that was hit (files inert on single tap).</summary>
+    public void OnTapped(Vector2 screenPoint)
+    {
+        if (TryGetNodeAt(screenPoint) is not { } hit)
+            return;
 
-            RebuildLevel();
+        _highlightedFrn = null;
+        if (hit.IsVolumeNode)
+        {
+            _currentVolume = hit.Volume;
+            _parentTrail.Clear();
+        }
+        else if (hit.File.IsDirectory)
+        {
+            _parentTrail.Push(hit.File.Id);
+        }
+        else
+        {
             return;
         }
+
+        RebuildLevel();
+    }
+
+    /// <summary>
+    /// Jumps to the level containing <paramref name="frn"/> (its parent's children),
+    /// highlights it, and centers the camera on it.
+    /// </summary>
+    public void NavigateTo(VolumeIndex volume, ulong frn)
+    {
+        if (!volume.TryGetNode(frn, out FileNode node))
+            return;
+
+        // Rebuild the trail root→parent by walking ancestors (same guards as GetPath).
+        var ancestors = new List<ulong>();
+        FileNode? current = node;
+        for (int depth = 0; current is not null && depth < 512; depth++)
+        {
+            if (current.ParentId == current.Id || !volume.TryGetNode(current.ParentId, out FileNode parent))
+                break;
+            ancestors.Add(parent.Id);
+            current = parent;
+        }
+        ancestors.Reverse();
+
+        _currentVolume = volume;
+        _parentTrail.Clear();
+        foreach (ulong ancestor in ancestors)
+            _parentTrail.Push(ancestor);
+
+        _highlightedFrn = frn;
+        RebuildLevel();
+
+        // Center the camera on the found node (RebuildLevel already picked a sane zoom).
+        GraphNode target = _nodes.FirstOrDefault(n => n.File.Id == frn);
+        if (target.File is not null)
+            _pan = _lastViewport / 2f - target.Position * _zoom;
     }
 
     // --- camera ---
@@ -168,12 +218,15 @@ public sealed class GraphView
             int i = 0;
             foreach (VolumeIndex volume in _machine.Volumes)
             {
+                long totalBytes = volume.RootEntries.Sum(n => n.SizeBytes);
                 _nodes.Add(new GraphNode(
-                    File: new FileNode(0, 0, volume.Volume, 0, IsDirectory: true),
+                    File: new FileNode(0, 0, volume.Volume, totalBytes, IsDirectory: true),
                     Volume: volume,
                     Position: Spiral(i++),
                     Radius: DirectoryRadius * 2,
-                    Label: $"{volume.Volume}  ({volume.Count:N0})"));
+                    Label: totalBytes > 0
+                        ? $"{volume.Volume}  ({volume.Count:N0} items, {FormatSize(totalBytes)})"
+                        : $"{volume.Volume}  ({volume.Count:N0})"));
             }
         }
         else
@@ -182,16 +235,19 @@ public sealed class GraphView
                 ? _currentVolume.RootEntries
                 : _currentVolume.GetChildren(_parentTrail.Peek());
 
-            // Directories first, then files; largest levels stay readable.
+            // Biggest first so heavy items sit near the spiral center; dirs before files at equal size.
             int i = 0;
-            foreach (FileNode child in children.OrderByDescending(c => c.IsDirectory).ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase))
+            foreach (FileNode child in children
+                .OrderByDescending(c => c.SizeBytes)
+                .ThenByDescending(c => c.IsDirectory)
+                .ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase))
             {
                 _nodes.Add(new GraphNode(
                     File: child,
                     Volume: _currentVolume,
                     Position: Spiral(i++),
-                    Radius: child.IsDirectory ? DirectoryRadius : FileRadius,
-                    Label: child.Name));
+                    Radius: SizeScaledRadius(child),
+                    Label: child.SizeBytes > 0 ? $"{child.Name}  ({FormatSize(child.SizeBytes)})" : child.Name));
             }
         }
 
@@ -202,6 +258,25 @@ public sealed class GraphView
 
     private static Vector2 Spiral(int i) =>
         SpiralSpacing * MathF.Sqrt(i) * new Vector2(MathF.Cos(i * GoldenAngle), MathF.Sin(i * GoldenAngle));
+
+    /// <summary>Log-scaled radius: 1 KB ≈ base, 1 GB+ visibly dominates, clamped for layout sanity.</summary>
+    private static float SizeScaledRadius(FileNode node)
+    {
+        float baseRadius = node.IsDirectory ? 14f : 6f;
+        if (node.SizeBytes <= 0)
+            return baseRadius;
+        float grown = baseRadius + 1.6f * MathF.Log2(1 + node.SizeBytes / 1024f);
+        return MathF.Min(grown, node.IsDirectory ? 52f : 40f);
+    }
+
+    private static string FormatSize(long bytes) => bytes switch
+    {
+        >= 1L << 40 => $"{bytes / (double)(1L << 40):F1} TB",
+        >= 1L << 30 => $"{bytes / (double)(1L << 30):F1} GB",
+        >= 1L << 20 => $"{bytes / (double)(1L << 20):F1} MB",
+        >= 1L << 10 => $"{bytes / (double)(1L << 10):F0} KB",
+        _ => $"{bytes} B",
+    };
 
     // --- drawing ---
 
@@ -218,6 +293,9 @@ public sealed class GraphView
         {
             Color fill = node.File.IsDirectory ? DirectoryColor : FileColor;
             session.FillCircle(node.Position, node.Radius, fill);
+
+            if (_highlightedFrn == node.File.Id && _currentVolume is not null)
+                session.DrawCircle(node.Position, node.Radius + 6, HighlightColor, 3f / _zoom);
 
             if (node.Radius * _zoom >= LabelMinScreenRadius)
             {

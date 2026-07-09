@@ -122,6 +122,40 @@ public class VolumeIndexTests
     }
 
     [Fact]
+    public async Task ApplySizes_SetsFilesByFrn_SkipsDirsAndUnknowns()
+    {
+        var index = await BuildAsync(SampleTree);
+
+        long applied = index.ApplySizes([(12, 2048), (10, 999) /* dir */, (777, 1) /* unknown */]);
+
+        Assert.Equal(1, applied);
+        Assert.True(index.TryGetNode(12, out var note));
+        Assert.Equal(2048, note.SizeBytes);
+        Assert.True(index.TryGetNode(10, out var dir));
+        Assert.Equal(0, dir.SizeBytes);
+    }
+
+    [Fact]
+    public async Task ComputeDirectorySizes_RollsUpSubtrees()
+    {
+        // C:\Users\benny\notes.txt (2048) + C:\Users\benny\Games\save.dat (100)
+        var tree = SampleTree.Append(new FileNode(14, 13, "save.dat", 0, false)).ToList();
+        var index = await BuildAsync(tree);
+        index.ApplySizes([(12, 2048), (14, 100)]);
+
+        index.ComputeDirectorySizes();
+
+        Assert.True(index.TryGetNode(13, out var games));
+        Assert.Equal(100, games.SizeBytes);
+        Assert.True(index.TryGetNode(11, out var benny));
+        Assert.Equal(2148, benny.SizeBytes);
+        Assert.True(index.TryGetNode(10, out var users));
+        Assert.Equal(2148, users.SizeBytes);
+        Assert.True(index.TryGetNode(20, out var windows));
+        Assert.Equal(0, windows.SizeBytes);
+    }
+
+    [Fact]
     public async Task Progress_ReportsCompletion()
     {
         var reports = new List<VolumeIndexProgress>();

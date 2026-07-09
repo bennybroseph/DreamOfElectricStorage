@@ -156,6 +156,28 @@ static async Task<int> RunIndexAsync(string searchTerm)
             Console.WriteLine($"  {volume.GetPath(node.Id)}");
     }
 
+    // Size proof: largest files and rollup dirs should match known disk hogs.
+    Console.WriteLine();
+    Console.WriteLine("largest files:");
+    static string Fmt(long b) => b switch
+    {
+        >= 1L << 30 => $"{b / (double)(1L << 30):F1} GB",
+        >= 1L << 20 => $"{b / (double)(1L << 20):F1} MB",
+        >= 1L << 10 => $"{b / (double)(1L << 10):F0} KB",
+        _ => $"{b} B",
+    };
+    foreach (var volume in machine.Volumes)
+    {
+        foreach (var node in volume.TopBySize(5, directories: false))
+            Console.WriteLine($"  {Fmt(node.SizeBytes),10}  {volume.GetPath(node.Id)}");
+    }
+    Console.WriteLine("largest directories (rollup):");
+    foreach (var volume in machine.Volumes)
+    {
+        foreach (var node in volume.TopBySize(5, directories: true))
+            Console.WriteLine($"  {Fmt(node.SizeBytes),10}  {volume.GetPath(node.Id)}");
+    }
+
     Console.WriteLine();
     var searchWatch = Stopwatch.StartNew();
     var hits = machine.Search(searchTerm).ToList();

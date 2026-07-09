@@ -44,9 +44,12 @@ public sealed class MachineIndex
                 // and removes converge), so nothing falls in the gap.
                 JournalState? journal = TryQueryJournal(volume);
 
-                return await VolumeIndex
+                VolumeIndex index = await VolumeIndex
                     .BuildAsync(volume, indexer.EnumerateAsync(volume, cancellationToken), cancellationToken, progress, journal)
                     .ConfigureAwait(false);
+
+                await FillSizesAsync(index, cancellationToken).ConfigureAwait(false);
+                return index;
             }
             catch (Exception ex) when (ex is NotSupportedException or IOException)
             {
@@ -78,6 +81,28 @@ public sealed class MachineIndex
             throw new InvalidOperationException($"{volume.Volume} was built without journal state; cannot watch.");
 
         return new UsnJournalWatcher().WatchAsync(volume.Volume, journal, cancellationToken);
+    }
+
+    /// <summary>
+    /// Bulk size fill + directory rollup. Best-effort like journal state: any failure
+    /// (non-elevated tests hitting real drives, exotic volumes) leaves sizes at 0 and
+    /// the index fully usable. Runs before the index is shared, so no writer conflict.
+    /// </summary>
+    private static async Task FillSizesAsync(VolumeIndex index, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var reader = new FileLayoutSizeReader();
+            var batch = new List<(ulong, long)>(capacity: 65536);
+            await foreach (var pair in reader.ReadSizesAsync(index.Volume, cancellationToken).ConfigureAwait(false))
+                batch.Add(pair);
+            index.ApplySizes(batch);
+            index.ComputeDirectorySizes();
+        }
+        catch (Exception ex) when (ex is NotSupportedException or IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            // sizes stay 0 for this volume
+        }
     }
 
     private static JournalState? TryQueryJournal(string volume)
