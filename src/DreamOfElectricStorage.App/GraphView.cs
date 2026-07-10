@@ -169,6 +169,11 @@ public sealed class GraphView
     private const float MinimapMargin = 16f;
     private const int MinimapMaxDots = 600;
     private float _minimapAlpha;                             // eased toward Show target in Advance
+
+    // Hover peek (V7): a small in-graph card after dwelling on a node.
+    private const float PeekDwellSeconds = 0.35f;
+    private float _hoverDwell;
+    private float _peekAlpha;
 #if DEBUG
     private long _frameCounter;
 #endif
@@ -192,8 +197,15 @@ public sealed class GraphView
         _clock.IsIdle = () =>
             Camera.Settled && !_fadeOut.Running && !_entrance.Running && _pendingLevelSwap is null
             && _swell.Count == 0 && RevealSettled && _pulseElapsed >= PulseSeconds && _dragSource is null
-            && MinimapSettled;
+            && MinimapSettled && PeekSettled;
     }
+
+    private float PeekTarget =>
+        _hoveredFrn is not null && _hoverDwell >= PeekDwellSeconds
+        && _pendingLevelSwap is null && _dragSource is null ? 1f : 0f;
+
+    private bool PeekSettled => MathF.Abs(_peekAlpha - PeekTarget) < 0.01f
+        && (_hoveredFrn is null || _hoverDwell >= PeekDwellSeconds);
 
     private bool MinimapSettled
     {
@@ -260,6 +272,14 @@ public sealed class GraphView
         _minimapAlpha += (minimapTarget - _minimapAlpha) * Easings.Approach(10f, dt);
         if (MathF.Abs(_minimapAlpha - minimapTarget) < 0.01f)
             _minimapAlpha = minimapTarget;
+
+        // Hover peek: dwell before showing (no card storms while sweeping the pointer).
+        if (_hoveredFrn is not null)
+            _hoverDwell += dt;
+        float peekTarget = PeekTarget;
+        _peekAlpha += (peekTarget - _peekAlpha) * Easings.Approach(14f, dt);
+        if (MathF.Abs(_peekAlpha - peekTarget) < 0.01f)
+            _peekAlpha = peekTarget;
 
         EvaluateAutoNavigation();
 
@@ -620,6 +640,7 @@ public sealed class GraphView
             return false;
 
         _hoveredFrn = frn;
+        _hoverDwell = 0f; // peek dwell restarts on every hover change
         if (frn is { } f)
             _swell.TryAdd(f, _swell.GetValueOrDefault(f));
         RecomputeRelated();
@@ -878,7 +899,7 @@ public sealed class GraphView
         return MathF.Min(grown, node.IsDirectory ? 52f : 40f);
     }
 
-    private static string FormatSize(long bytes) => bytes switch
+    internal static string FormatSize(long bytes) => bytes switch
     {
         >= 1L << 40 => $"{bytes / (double)(1L << 40):F1} TB",
         >= 1L << 30 => $"{bytes / (double)(1L << 30):F1} GB",
@@ -1052,6 +1073,7 @@ public sealed class GraphView
         }
 
         DrawMinimap(session);
+        DrawHoverPeek(session);
 
         _drawTimer.Stop();
         if (_drawSamples.Count < 4096)
@@ -1201,10 +1223,7 @@ public sealed class GraphView
             // thumbnail failed → fall through to the generic icon
         }
 
-        string ext = System.IO.Path.GetExtension(path);
-        string key = ext is ".exe" or ".lnk" or ".ico" || ext.Length == 0
-            ? "P|" + path                       // own-icon files
-            : "E|" + ext.ToLowerInvariant();    // one icon per extension
+        string key = IconKeyFor(path);
         CanvasBitmap? icon = Images.TryGet(key);
         if (icon is null)
         {
@@ -1214,6 +1233,95 @@ public sealed class GraphView
         float side = radius * 1.4f;
         sprites.Draw(icon, new Windows.Foundation.Rect(pos.X - side / 2, pos.Y - side / 2, side, side), Vector4.One);
     }
+
+    private static string IconKeyFor(string path)
+    {
+        string ext = System.IO.Path.GetExtension(path);
+        return ext is ".exe" or ".lnk" or ".ico" || ext.Length == 0
+            ? "P|" + path                       // own-icon files
+            : "E|" + ext.ToLowerInvariant();    // one icon per extension
+    }
+
+    internal static string CategoryLabel(FileTypeCategory category)
+    {
+        foreach (var (cat, label, _) in TypePalette)
+        {
+            if (cat == category)
+                return label;
+        }
+        return "Other";
+    }
+
+    /// <summary>Small in-graph card next to the hovered node after a short dwell.</summary>
+    private void DrawHoverPeek(CanvasDrawingSession session)
+    {
+        if (_peekAlpha <= 0.02f || _hoveredFrn is not { } frn)
+            return;
+        GraphNode node = _nodes.FirstOrDefault(n => n.File.Id == frn);
+        if (node.File is null)
+            return;
+
+        session.Transform = Matrix3x2.Identity;
+        float a = _peekAlpha;
+        const float W = 272f, H = 86f;
+
+        Vector2 nodeScreen = Camera.WorldToScreen(node.Position);
+        var pos = nodeScreen + new Vector2(node.Radius * Camera.Zoom + 14f, -H / 2f);
+        pos.X = Math.Clamp(pos.X, 8f, _lastViewport.X - W - 8f);
+        pos.Y = Math.Clamp(pos.Y, 8f, _lastViewport.Y - H - 8f);
+
+        session.FillRoundedRectangle(pos.X, pos.Y, W, H, 10, 10, WithAlpha(Color.FromArgb(240, 22, 28, 37), a));
+        session.DrawRoundedRectangle(pos.X, pos.Y, W, H, 10, 10, WithAlpha(Color.FromArgb(90, 122, 168, 210), a), 1f);
+
+        // Thumbnail (media) or icon; requested here — hover is exactly when it's wanted.
+        CanvasBitmap? image = null;
+        if (node.Path is { } path)
+        {
+            bool media = !node.File.IsDirectory && node.Category is FileTypeCategory.Image or FileTypeCategory.Video;
+            string key = media ? "T|" + path : IconKeyFor(path);
+            image = Images.TryGet(key);
+            if (image is null && !Images.IsResolved(key))
+                Images.Request(key, path, thumbnail: media);
+            if (image is null && media)
+                image = Images.TryGet(IconKeyFor(path)); // icon fallback while/if thumb is unavailable
+        }
+        float textX = pos.X + 12f;
+        if (image is not null)
+        {
+            session.DrawImage(image,
+                new Windows.Foundation.Rect(pos.X + 11, pos.Y + 11, 64, 64),
+                new Windows.Foundation.Rect(0, 0, image.SizeInPixels.Width, image.SizeInPixels.Height), a);
+            textX = pos.X + 86f;
+        }
+
+        string name = node.File.Name.Length > 26 ? node.File.Name[..25] + "…" : node.File.Name;
+        string line2 = node.File.IsDirectory
+            ? $"{node.Volume.GetChildren(node.File.Id).Count:N0} items · {FormatSize(node.File.SizeBytes)}"
+            : $"{FormatSize(node.File.SizeBytes)} · {CategoryLabel(node.Category)}";
+        session.DrawText(name, new Vector2(textX, pos.Y + 12), WithAlpha(LabelColor, a), PeekTitleFormat);
+        session.DrawText(line2, new Vector2(textX, pos.Y + 36), WithAlpha(Color.FromArgb(200, 181, 188, 201), a), PeekBodyFormat);
+        if (node.File.LastWriteFileTime > 0)
+        {
+            string modified = "Modified " + DateTime.FromFileTimeUtc(node.File.LastWriteFileTime).ToLocalTime().ToString("g");
+            session.DrawText(modified, new Vector2(textX, pos.Y + 56), WithAlpha(Color.FromArgb(170, 181, 188, 201), a), PeekBodyFormat);
+        }
+
+        session.Transform = Camera.Transform;
+    }
+
+    private static readonly CanvasTextFormat PeekTitleFormat = new()
+    {
+        FontSize = 13,
+        HorizontalAlignment = CanvasHorizontalAlignment.Left,
+        VerticalAlignment = CanvasVerticalAlignment.Top,
+    };
+
+    private static readonly CanvasTextFormat PeekBodyFormat = new()
+    {
+        FontSize = 11.5f,
+        HorizontalAlignment = CanvasHorizontalAlignment.Left,
+        VerticalAlignment = CanvasVerticalAlignment.Top,
+    };
 
     private void QueueDirBadge(VolumeIndex volume, FileNode file, Vector2 pos, float screenR, bool isVolumeLevel)
     {

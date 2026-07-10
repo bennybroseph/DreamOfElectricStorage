@@ -402,16 +402,35 @@ public sealed partial class MainPage : Page
             HideRelatedPanel();
     }
 
-    /// <summary>Machine-wide duplicate scan for the selected file → side panel.</summary>
+    private string? _detailPath;
+    private int _detailToken; // selection changed mid-await → stale async results dropped
+
+    /// <summary>Full preview + machine-wide duplicate scan for the selected file → side panel.</summary>
     private void ShowRelatedPanel(GraphView.NodeHit hit)
     {
         if (_machine is null)
             return;
 
+        int token = ++_detailToken;
+        _detailPath = hit.Volume.GetPath(hit.File.Id);
+
+        DetailName.Text = hit.File.Name;
+        string modified = hit.File.LastWriteFileTime > 0
+            ? DateTime.FromFileTimeUtc(hit.File.LastWriteFileTime).ToLocalTime().ToString("g")
+            : "unknown";
+        DetailMeta.Text = $"{GraphView.FormatSize(hit.File.SizeBytes)} · {GraphView.CategoryLabel(FileTypeClassifier.Classify(hit.File.Name))} · modified {modified}\n{_detailPath}";
+        DetailOpen.IsEnabled = DetailReveal.IsEnabled = _detailPath is not null;
+        DetailThumb.Visibility = Visibility.Collapsed;
+        DetailTextBorder.Visibility = Visibility.Collapsed;
+
+        if (_detailPath is { } path)
+        {
+            _ = LoadDetailThumbnailAsync(path, token);
+            _ = LoadDetailTextPreviewAsync(path, token);
+        }
+
         // UI-thread sync on purpose (single-writer contract); ~search cost, only on click.
         var duplicates = _machine.FindDuplicates(hit.Volume, hit.File);
-
-        RelatedTitle.Text = $"Related — {hit.File.Name}";
         if (duplicates.Count == 0)
         {
             RelatedSummary.Text = "No duplicate candidates on any indexed volume (same name + size).";
@@ -426,6 +445,63 @@ public sealed partial class MainPage : Page
                 .ToList();
         }
         RelatedPanel.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>Shell thumbnail for the panel (any file type with a handler); silent on failure.</summary>
+    private async Task LoadDetailThumbnailAsync(string path, int token)
+    {
+        try
+        {
+            var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path);
+            using var thumb = await file.GetThumbnailAsync(
+                Windows.Storage.FileProperties.ThumbnailMode.SingleItem, 320);
+            if (thumb is null || token != _detailToken)
+                return;
+            var image = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage();
+            await image.SetSourceAsync(thumb);
+            if (token != _detailToken)
+                return;
+            DetailThumb.Source = image;
+            DetailThumb.Visibility = Visibility.Visible;
+        }
+        catch (Exception)
+        {
+            // nonexistent path (demo) / no thumbnail handler — panel just shows metadata
+        }
+    }
+
+    private static readonly string[] TextPreviewExtensions =
+        [".txt", ".md", ".log", ".ini", ".json", ".xml", ".xaml", ".cs", ".ps1", ".yaml", ".yml", ".csv", ".config"];
+
+    /// <summary>First lines of text-ish files; silent on failure.</summary>
+    private async Task LoadDetailTextPreviewAsync(string path, int token)
+    {
+        if (!TextPreviewExtensions.Contains(Path.GetExtension(path).ToLowerInvariant()))
+            return;
+        try
+        {
+            string text = await Task.Run(() =>
+            {
+                var lines = File.ReadLines(path).Take(120);
+                string joined = string.Join('\n', lines);
+                return joined.Length > 8000 ? joined[..8000] + "\n…" : joined;
+            });
+            if (token != _detailToken || text.Length == 0)
+                return;
+            DetailTextPreview.Text = text;
+            DetailTextBorder.Visibility = Visibility.Visible;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FileNotFoundException or DirectoryNotFoundException)
+        {
+        }
+    }
+
+    private void OnDetailOpenClick(object sender, RoutedEventArgs e) => OpenPath(_detailPath);
+
+    private void OnDetailRevealClick(object sender, RoutedEventArgs e)
+    {
+        if (_detailPath is { } path)
+            RevealInExplorer(path);
     }
 
     private void HideRelatedPanel()

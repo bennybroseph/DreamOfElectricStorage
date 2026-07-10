@@ -42,6 +42,7 @@ public sealed class DemoDriveIndexer(int stressFiles = 0) : IDriveIndexer
         // loading without elevation (fake paths fall back to plain shapes).
         File(nodes, ref nextFile, 10, "explorer.exe", 5_400_000, AgeDays(500));
         File(nodes, ref nextFile, 10, "notepad.exe", 360_000, AgeDays(500));
+        File(nodes, ref nextFile, 10, "win.ini", 400, AgeDays(500)); // real text file → panel text preview
         File(nodes, ref nextFile, 11, "kernel32.dll", 780_000, AgeDays(500));
         File(nodes, ref nextFile, 11, "user32.dll", 1_700_000, AgeDays(500));
         Dir(nodes, 12, 10, "Web");

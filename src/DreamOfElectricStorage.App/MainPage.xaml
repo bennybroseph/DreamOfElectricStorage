@@ -119,11 +119,32 @@
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
-                <TextBlock x:Name="RelatedTitle" Grid.Row="0" Style="{StaticResource BodyStrongTextBlockStyle}" Text="Related" />
-                <TextBlock x:Name="RelatedSummary" Grid.Row="1" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.75" TextWrapping="Wrap" />
-                <ListView x:Name="RelatedList" Grid.Row="2" SelectionMode="None" IsItemClickEnabled="True" ItemClick="OnRelatedItemClick">
+                <TextBlock x:Name="DetailName" Grid.Row="0" Style="{StaticResource BodyStrongTextBlockStyle}" TextWrapping="Wrap" />
+                <Image x:Name="DetailThumb" Grid.Row="1" MaxHeight="180" Stretch="Uniform"
+                       HorizontalAlignment="Left" Visibility="Collapsed" />
+                <TextBlock x:Name="DetailMeta" Grid.Row="2" Style="{StaticResource CaptionTextBlockStyle}"
+                           Opacity="0.75" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="8">
+                    <Button x:Name="DetailOpen" Content="Open" Click="OnDetailOpenClick" />
+                    <Button x:Name="DetailReveal" Content="Reveal in Explorer" Click="OnDetailRevealClick" />
+                </StackPanel>
+                <Border x:Name="DetailTextBorder" Grid.Row="4" Visibility="Collapsed" CornerRadius="6"
+                        Background="{ThemeResource SubtleFillColorSecondaryBrush}" Padding="8" MaxHeight="170">
+                    <ScrollViewer>
+                        <TextBlock x:Name="DetailTextPreview" FontFamily="Consolas" FontSize="11.5"
+                                   TextWrapping="Wrap" IsTextSelectionEnabled="True" Opacity="0.9" />
+                    </ScrollViewer>
+                </Border>
+                <TextBlock x:Name="RelatedTitle" Grid.Row="5" Style="{StaticResource BodyStrongTextBlockStyle}" Text="Related" />
+                <TextBlock x:Name="RelatedSummary" Grid.Row="6" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.75" TextWrapping="Wrap" />
+                <ListView x:Name="RelatedList" Grid.Row="7" SelectionMode="None" IsItemClickEnabled="True" ItemClick="OnRelatedItemClick">
                     <ListView.ItemTemplate>
                         <DataTemplate x:DataType="local:SearchResult">
                             <StackPanel Padding="0,6">
