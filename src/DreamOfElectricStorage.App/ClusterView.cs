@@ -21,6 +21,7 @@ namespace DreamOfElectricStorage.App;
 public sealed class ClusterView : ISceneView
 {
     private const int MaxWorkingSet = 4000;      // working-set cap fed to the layout/physics
+    private const int SolveIterations = 120;      // off-thread settle iterations at load
 
     // Home-drive palette (mirrors the design mockup): white C:, cyan D:, violet E:.
     private static readonly (char Letter, Color Color)[] DrivePalette =
@@ -61,6 +62,12 @@ public sealed class ClusterView : ISceneView
 
     private ulong? _dragId;
     private Vector2 _dragWorld;
+    private bool _settling; // initial Solve running off-thread; layout is bg-owned
+
+    // Perf probe (harness `perf` verb): Solve at load + per-frame step/draw/cluster timings.
+    private readonly System.Diagnostics.Stopwatch _timer = new();
+    private double _solveMs, _lastStepMs, _lastDrawMs, _lastClusterMs;
+    private double _maxStepMs;
 
     public GraphCamera Camera { get; } = new();
     public bool LightTheme { get; set; }
@@ -76,7 +83,7 @@ public sealed class ClusterView : ISceneView
     public ForceWeights Weights
     {
         get => _weights;
-        set { _weights = value; _clustersDirty = true; if (_layout is not null) { _layout.Weights = value; _clock.RequestFrames(); } }
+        set { _weights = value; _clustersDirty = true; if (_layout is not null && !_settling) { _layout.Weights = value; _clock.RequestFrames(); } }
     }
 
     public event Action? RedrawNeeded;
@@ -89,12 +96,17 @@ public sealed class ClusterView : ISceneView
 
     private void Advance(float dt)
     {
-        if (_layout is not null)
+        // While the initial Solve runs off-thread, the layout is owned by that thread —
+        // don't touch it here (just keep the camera easing).
+        if (_layout is not null && !_settling)
         {
             if (_dragId is { } id)
                 _layout.SetPosition(id, _dragWorld);
+            _timer.Restart();
             _lastMove = _layout.Step(dt);
             _positions = _layout.Positions();
+            _lastStepMs = _timer.Elapsed.TotalMilliseconds;
+            _maxStepMs = Math.Max(_maxStepMs, _lastStepMs);
             _clustersDirty = true; // positions moved → LOD clusters stale
         }
         Camera.Advance(dt);
@@ -102,6 +114,9 @@ public sealed class ClusterView : ISceneView
     }
 
     public int TotalEligible { get; private set; }
+
+    /// <summary>True while the initial layout is settling off-thread (nothing to draw yet).</summary>
+    public bool IsSettling => _settling;
 
     public void SetIndex(MachineIndex machine)
     {
@@ -119,12 +134,35 @@ public sealed class ClusterView : ISceneView
             $"{info.Name.ToLowerInvariant()}|{info.SizeBytes}", NameStem.Normalize(info.Name)))
             .ToArray();
 
-        _layout = new ClusterLayout(graph.Items, graph.Groups, _weights);
-        _layout.Solve(150); // settle before first paint so the view opens calm, not chaotic
-        _positions = _layout.Positions();
-        _clustersDirty = true;
-        _pendingInitialFit = true;
-        _clock.RequestFrames();
+        var layout = new ClusterLayout(graph.Items, graph.Groups, _weights);
+        _layout = layout;
+        _positions = [];
+        _settling = true;
+        RedrawNeeded?.Invoke(); // paint the "arranging…" placeholder immediately
+
+        // Settle off the UI thread — a big working set's Solve can take seconds and must not
+        // freeze the window. The layout is bg-owned until this completes.
+        var dispatcher = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
+        var solveTimer = System.Diagnostics.Stopwatch.StartNew();
+        Task.Run(() =>
+        {
+            layout.Solve(SolveIterations);
+            solveTimer.Stop();
+            var settled = layout.Positions();
+            dispatcher.TryEnqueue(() =>
+            {
+                if (!ReferenceEquals(_layout, layout))
+                    return; // a newer SetIndex superseded this solve
+                _positions = settled;
+                _solveMs = solveTimer.Elapsed.TotalMilliseconds;
+                _maxStepMs = 0;
+                _settling = false;
+                _clustersDirty = true;
+                _pendingInitialFit = true;
+                _clock.RequestFrames();
+                RedrawNeeded?.Invoke();
+            });
+        });
     }
 
     private static Color DriveColor(string volume)
@@ -146,7 +184,18 @@ public sealed class ClusterView : ISceneView
 
     public void Draw(CanvasControl canvas, CanvasDrawingSession session)
     {
+        _timer.Restart();
         _lastViewport = new Vector2((float)canvas.ActualWidth, (float)canvas.ActualHeight);
+
+        if (_settling)
+        {
+            session.Transform = Matrix3x2.Identity;
+            Color msg = LightTheme ? Color.FromArgb(200, 60, 68, 82) : Color.FromArgb(200, 170, 178, 190);
+            using var f = new CanvasTextFormat { FontSize = 15f, HorizontalAlignment = CanvasHorizontalAlignment.Center };
+            session.DrawText($"arranging {_meta.Length:N0} files…", _lastViewport / 2f, msg, f);
+            return;
+        }
+
         if (_pendingInitialFit && _positions.Count > 0)
         {
             Camera.ZoomToFit(_lastViewport, ContentExtent(), fly: false);
@@ -188,6 +237,16 @@ public sealed class ClusterView : ISceneView
             if (summaryAlpha > 0.001f)
                 DrawSummary(session, c, zoom, summaryAlpha, labelColor);
         }
+        _lastDrawMs = _timer.Elapsed.TotalMilliseconds;
+    }
+
+    /// <summary>Harness perf snapshot for the Clusters view.</summary>
+    public string PerfReport()
+    {
+        string report = $"nodes={_meta.Length} clusters={_clusterCache?.Count ?? 0}\n"
+            + $"solve={_solveMs:F1}ms step(last/max)={_lastStepMs:F1}/{_maxStepMs:F1}ms cluster={_lastClusterMs:F1}ms draw={_lastDrawMs:F1}ms";
+        _maxStepMs = _lastStepMs;
+        return report;
     }
 
     private void DrawFile(CanvasDrawingSession session, int i, float zoom, float alpha, Color labelColor)
@@ -233,7 +292,9 @@ public sealed class ClusterView : ISceneView
     {
         if (!_clustersDirty && _clusterCache is not null)
             return _clusterCache;
+        var clusterTimer = System.Diagnostics.Stopwatch.StartNew();
         _clusterCache = ComputeClusters();
+        _lastClusterMs = clusterTimer.Elapsed.TotalMilliseconds;
         _clustersDirty = false;
         return _clusterCache;
     }
@@ -241,7 +302,8 @@ public sealed class ClusterView : ISceneView
     /// <summary>
     /// Single-linkage spatial clustering of settled positions (union-find): nodes whose
     /// centers are within (r_i+r_j)·LinkFactor join — within a well they touch, between
-    /// wells they don't. O(n²) — fine for the C2/C4 demo working set; C6 swaps to a grid.
+    /// wells they don't. A uniform grid (cell = max link distance) keeps it near-linear so
+    /// it stays cheap on the full working set.
     /// </summary>
     private List<SummaryCluster> ComputeClusters()
     {
@@ -251,13 +313,38 @@ public sealed class ClusterView : ISceneView
             parent[i] = i;
         int Find(int a) { while (parent[a] != a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; }
 
+        float maxR = 0f;
         for (int i = 0; i < n; i++)
-            for (int j = i + 1; j < n; j++)
-            {
-                double link = (_meta[i].Radius + _meta[j].Radius) * LinkFactor;
-                if ((_positions[i] - _positions[j]).LengthSquared() <= link * link)
-                    parent[Find(i)] = Find(j);
-            }
+            maxR = MathF.Max(maxR, _meta[i].Radius);
+        double cell = MathF.Max(2f * maxR * (float)LinkFactor, 1f); // covers the largest possible link
+        var grid = new Dictionary<long, List<int>>();
+        for (int i = 0; i < n; i++)
+        {
+            long key = CellKey(_positions[i], cell);
+            if (!grid.TryGetValue(key, out var list))
+                grid[key] = list = [];
+            list.Add(i);
+        }
+
+        for (int i = 0; i < n; i++)
+        {
+            int gx = (int)Math.Floor(_positions[i].X / cell);
+            int gy = (int)Math.Floor(_positions[i].Y / cell);
+            for (int nx = gx - 1; nx <= gx + 1; nx++)
+                for (int ny = gy - 1; ny <= gy + 1; ny++)
+                {
+                    if (!grid.TryGetValue(Pack(nx, ny), out var neighbors))
+                        continue;
+                    foreach (int j in neighbors)
+                    {
+                        if (j <= i)
+                            continue;
+                        double link = (_meta[i].Radius + _meta[j].Radius) * LinkFactor;
+                        if ((_positions[i] - _positions[j]).LengthSquared() <= link * link)
+                            parent[Find(i)] = Find(j);
+                    }
+                }
+        }
 
         var byRoot = new Dictionary<int, List<int>>();
         for (int i = 0; i < n; i++)
@@ -299,6 +386,11 @@ public sealed class ClusterView : ISceneView
     }
 
     private static uint ColorKey(Color c) => (uint)(c.R << 16 | c.G << 8 | c.B);
+
+    private static long CellKey(Vector2 p, double cell) =>
+        Pack((int)Math.Floor(p.X / cell), (int)Math.Floor(p.Y / cell));
+
+    private static long Pack(int gx, int gy) => ((long)gx << 32) ^ (uint)gy;
 
     /// <summary>Harness view of the LOD state: one line per cluster (count, screen radius, state).</summary>
     public IReadOnlyList<(int Count, float ScreenRadius, string State)> ClusterSummaries()

@@ -152,6 +152,53 @@ public class ClusterLayoutTests
     }
 
     [Fact]
+    public void GridPath_LargeSet_IsDeterministic_AndBounded()
+    {
+        // > AllPairsMax(512) forces the spatial-grid repulsion path.
+        var items = Enumerable.Range(1, 800).Select(i => Item((ulong)i, i * 2048)).ToList();
+        var groups = new List<ClusterLayout.Group>
+        {
+            new(WellKind.Duplicate, Enumerable.Range(1, 40).Select(i => (ulong)i).ToArray()),
+            new(WellKind.Folder, Enumerable.Range(100, 60).Select(i => (ulong)i).ToArray()),
+        };
+
+        var a = new ClusterLayout(items, groups);
+        var b = new ClusterLayout(items, groups);
+        a.Solve(120);
+        b.Solve(120);
+
+        var pa = a.Positions();
+        var pb = b.Positions();
+        for (int i = 0; i < pa.Count; i++)
+        {
+            Assert.Equal(pa[i], pb[i]); // grid path stays deterministic
+            Assert.True(float.IsFinite(pa[i].X) && float.IsFinite(pa[i].Y) && pa[i].Length() < 1e7f);
+        }
+    }
+
+    [Fact]
+    public void GridPath_SeparatesWells()
+    {
+        // Two disjoint duplicate wells embedded in a large (grid-path) set.
+        var items = Enumerable.Range(1, 700).Select(i => Item((ulong)i)).ToList();
+        ulong[] wellA = Enumerable.Range(1, 30).Select(i => (ulong)i).ToArray();
+        ulong[] wellB = Enumerable.Range(31, 30).Select(i => (ulong)i).ToArray();
+        var groups = new List<ClusterLayout.Group>
+        {
+            new(WellKind.Duplicate, wellA),
+            new(WellKind.Duplicate, wellB),
+        };
+        var layout = new ClusterLayout(items, groups, new ForceWeights(SizeGravity: 0));
+        layout.Solve(150);
+
+        Vector2 P(ulong id) => layout.PositionOf(id);
+        double intraA = MeanPairDistance(wellA.Select(P));
+        Vector2 cA = Centroid(wellA.Select(P).ToList());
+        Vector2 cB = Centroid(wellB.Select(P).ToList());
+        Assert.True((cA - cB).Length() > intraA);
+    }
+
+    [Fact]
     public void UnknownGroupMembers_AreIgnored()
     {
         var items = new List<ClusterLayout.Item> { Item(1), Item(2) };

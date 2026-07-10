@@ -56,6 +56,8 @@ public sealed class ClusterLayout
     private const double RepulsionK = 1.4;     // pairwise push
     private const double GravityK = 0.010;     // size-scaled pull to origin
     private const double MinNodeRadius = 6.0;
+    private const int AllPairsMax = 512;        // ≤ this: exact O(n²); above: spatial grid
+    private const double CutoffFactor = 12.0;   // repulsion ignored past this·maxRadius (grid path)
 
     private readonly ulong[] _ids;
     private readonly Dictionary<ulong, int> _index;
@@ -65,6 +67,8 @@ public sealed class ClusterLayout
     private readonly double[] _dx, _dy;        // scratch displacement
     private readonly (WellKind Kind, int[] Members)[] _groups;
     private readonly double _initialSpread;
+    private readonly double _maxRadius;
+    private readonly Dictionary<long, List<int>> _grid = [];  // cell key → node indices (grid path)
 
     public ForceWeights Weights { get; set; } = new();
     public int Count => _ids.Length;
@@ -96,6 +100,7 @@ public sealed class ClusterLayout
         }
         for (int i = 0; i < n; i++)
             _mass[i] /= maxRaw; // normalize to (0,1]
+        _maxRadius = n > 0 ? _radius.Max() : MinNodeRadius;
 
         // Seeded initial scatter on a disk sized to the total node area — deterministic.
         double totalArea = _radius.Sum(r => r * r) + 1;
@@ -173,22 +178,18 @@ public sealed class ClusterLayout
         Array.Clear(_dy);
 
         // Repulsion — every pair pushes apart, stronger for bigger nodes and when closer.
+        // Exact O(n²) for small sets; a uniform spatial grid with a distance cutoff above
+        // AllPairsMax (repulsion is negligible past a few radii anyway).
         double rep = RepulsionK * Math.Max(Weights.Repulsion, 0);
-        for (int i = 0; i < n; i++)
+        if (n <= AllPairsMax)
         {
-            for (int j = i + 1; j < n; j++)
-            {
-                double ddx = _x[i] - _x[j];
-                double ddy = _y[i] - _y[j];
-                double dist2 = ddx * ddx + ddy * ddy + 1e-6;
-                double dist = Math.Sqrt(dist2);
-                double sr = _radius[i] + _radius[j];
-                // Falls off with distance; a small floor keeps coincident points from exploding.
-                double f = rep * sr * sr / dist2;
-                double ux = ddx / dist, uy = ddy / dist;
-                _dx[i] += ux * f; _dy[i] += uy * f;
-                _dx[j] -= ux * f; _dy[j] -= uy * f;
-            }
+            for (int i = 0; i < n; i++)
+                for (int j = i + 1; j < n; j++)
+                    Repel(i, j, rep);
+        }
+        else
+        {
+            RepelGrid(rep);
         }
 
         // Attraction — each item springs toward the centroid of every well it belongs to,
@@ -234,6 +235,68 @@ public sealed class ClusterLayout
         }
         return maxMove;
     }
+
+    /// <summary>Apply the symmetric repulsion force to a single pair.</summary>
+    private void Repel(int i, int j, double rep)
+    {
+        double ddx = _x[i] - _x[j];
+        double ddy = _y[i] - _y[j];
+        double dist2 = ddx * ddx + ddy * ddy + 1e-6;
+        double dist = Math.Sqrt(dist2);
+        double sr = _radius[i] + _radius[j];
+        // Falls off with distance; a small floor keeps coincident points from exploding.
+        double f = rep * sr * sr / dist2;
+        double ux = ddx / dist, uy = ddy / dist;
+        _dx[i] += ux * f; _dy[i] += uy * f;
+        _dx[j] -= ux * f; _dy[j] -= uy * f;
+    }
+
+    /// <summary>
+    /// Repulsion via a uniform grid: each node only repels those in its own + 8 neighbor
+    /// cells (cell size = cutoff), so far pairs — whose 1/dist² force is negligible — are
+    /// skipped. Deterministic: cells fill in node-index order, pairs applied at min index.
+    /// </summary>
+    private void RepelGrid(double rep)
+    {
+        int n = _ids.Length;
+        double cutoff = CutoffFactor * _maxRadius;
+        double cutoff2 = cutoff * cutoff;
+        foreach (var list in _grid.Values)
+            list.Clear();
+
+        for (int i = 0; i < n; i++)
+        {
+            long key = CellKey(_x[i], _y[i], cutoff);
+            if (!_grid.TryGetValue(key, out var list))
+                _grid[key] = list = [];
+            list.Add(i);
+        }
+
+        for (int i = 0; i < n; i++)
+        {
+            int cx = (int)Math.Floor(_x[i] / cutoff);
+            int cy = (int)Math.Floor(_y[i] / cutoff);
+            for (int gx = cx - 1; gx <= cx + 1; gx++)
+                for (int gy = cy - 1; gy <= cy + 1; gy++)
+                {
+                    if (!_grid.TryGetValue(Pack(gx, gy), out var cell))
+                        continue;
+                    foreach (int j in cell)
+                    {
+                        if (j <= i)
+                            continue; // each unordered pair once, at the smaller index
+                        double ddx = _x[i] - _x[j], ddy = _y[i] - _y[j];
+                        if (ddx * ddx + ddy * ddy <= cutoff2)
+                            Repel(i, j, rep);
+                    }
+                }
+        }
+    }
+
+    private static long CellKey(double x, double y, double cell) =>
+        Pack((int)Math.Floor(x / cell), (int)Math.Floor(y / cell));
+
+    private static long Pack(int gx, int gy) => ((long)gx << 32) ^ (uint)gy;
 
     /// <summary>Well descriptors (centroid + enclosing radius) for the current positions.</summary>
     public IReadOnlyList<Well> Wells()

@@ -1210,7 +1210,7 @@ public sealed partial class MainPage : Page
             }
 
             case "perf":
-                return _graph.PerfReport();
+                return ClustersMode ? _clusters.PerfReport() : _graph.PerfReport();
 
             case "settings": // settings theme <system|light|dark> | legend <on|off> | motion <on|off>
                 switch (parts[1].ToLowerInvariant())
