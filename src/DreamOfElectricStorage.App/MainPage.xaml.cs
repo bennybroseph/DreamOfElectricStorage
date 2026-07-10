@@ -28,6 +28,7 @@ public sealed partial class MainPage : Page
     private const int SearchMaxResults = 100;
 
     private readonly GraphView _graph = new();
+    private readonly ClusterView _clusters = new();
     private bool _isPointerDown;
     private bool _pointerMoved;
     private Vector2 _lastPointer;
@@ -38,11 +39,17 @@ public sealed partial class MainPage : Page
     private readonly SettingsStore _settings = SettingsStore.Load();
     private bool _settingsUiReady;
 
+    private bool ClustersMode => _settings.ViewMode == "Clusters";
+
+    /// <summary>The view currently driving the canvas loop (shared surface only).</summary>
+    private ISceneView Active => ClustersMode ? _clusters : _graph;
+
     public MainPage()
     {
         InitializeComponent();
         _graph.LevelChanged += OnGraphLevelChanged;
         _graph.RedrawNeeded += () => GraphCanvas.Invalidate(); // animation clock → repaint
+        _clusters.RedrawNeeded += () => GraphCanvas.Invalidate();
         _graph.Images.Ready += () => DispatcherQueue.TryEnqueue(() => GraphCanvas.Invalidate()); // icons arrive off-thread
         Loaded += OnPageLoaded;
         RefreshLegend();
@@ -57,7 +64,7 @@ public sealed partial class MainPage : Page
             if (Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(XamlRoot) is TextBox)
                 return;
             args.Handled = true;
-            _graph.ZoomHome();
+            Active.ZoomHome();
         };
         KeyboardAccelerators.Add(homeKey);
 
@@ -91,6 +98,7 @@ public sealed partial class MainPage : Page
     {
         _settingsUiReady = false;
         ThemeChoice.SelectedIndex = ThemeIndex(_settings.Theme);
+        ViewChoice.SelectedIndex = ClustersMode ? 0 : 1;
         _settingsUiReady = true;
     }
 
@@ -112,21 +120,54 @@ public sealed partial class MainPage : Page
             _ => ElementTheme.Default,
         };
         ApplyCanvasTheme();
-        LegendPanel.Visibility = _settings.ShowLegend && _graph.ColorMode != GraphColorMode.None
+        LegendPanel.Visibility = !ClustersMode && _settings.ShowLegend && _graph.ColorMode != GraphColorMode.None
             ? Visibility.Visible : Visibility.Collapsed;
-        _graph.ReduceMotion = _settings.ReduceMotion;
+        _graph.ReduceMotion = _clusters.ReduceMotion = _settings.ReduceMotion;
         _graph.ShowSystemFolders = _settings.ShowSystemFolders;
+        ApplyViewMode();
         GraphCanvas.Invalidate();
+    }
+
+    /// <summary>Toggle chrome that only makes sense for the Cells (hierarchy) view.</summary>
+    private void ApplyViewMode()
+    {
+        bool cells = !ClustersMode;
+        // Breadcrumb/Up are hierarchy navigation — inert in the Clusters map (C0).
+        UpButton.Visibility = BreadcrumbTrail.Visibility = ColorModeCombo.Visibility =
+            cells ? Visibility.Visible : Visibility.Collapsed;
+        if (cells)
+            UpButton.IsEnabled = _graph.CanGoUp;
     }
 
     /// <summary>Canvas chrome follows ActualTheme (covers "System" flips while running).</summary>
     private void ApplyCanvasTheme()
     {
         bool light = ActualTheme == ElementTheme.Light;
-        _graph.LightTheme = light;
+        _graph.LightTheme = _clusters.LightTheme = light;
         GraphCanvas.ClearColor = light
             ? Windows.UI.Color.FromArgb(255, 242, 245, 249)
             : Windows.UI.Color.FromArgb(255, 20, 24, 31);
+        GraphCanvas.Invalidate();
+    }
+
+    private void OnViewChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_settingsUiReady || ViewChoice.SelectedItem is not string mode)
+            return;
+        SwitchView(mode);
+    }
+
+    private void SwitchView(string mode)
+    {
+        if (_settings.ViewMode == mode)
+            return;
+        _settings.ViewMode = mode;
+        _settings.Save();
+        _clusters.LightTheme = _graph.LightTheme = ActualTheme == ElementTheme.Light;
+        ApplyViewMode();
+        RefreshLegend();
+        LegendPanel.Visibility = !ClustersMode && _settings.ShowLegend && _graph.ColorMode != GraphColorMode.None
+            ? Visibility.Visible : Visibility.Collapsed;
         GraphCanvas.Invalidate();
     }
 
@@ -247,6 +288,7 @@ public sealed partial class MainPage : Page
 
             _machine = machine;
             _graph.SetIndex(machine);
+            _clusters.SetIndex(machine);
             SearchBox.IsEnabled = true;
 
             _liveChanges = 0;
@@ -341,7 +383,7 @@ public sealed partial class MainPage : Page
 
     private void OnUpClick(object sender, RoutedEventArgs e) => _graph.GoUp();
 
-    private void OnHomeClick(object sender, RoutedEventArgs e) => _graph.ZoomHome();
+    private void OnHomeClick(object sender, RoutedEventArgs e) => Active.ZoomHome();
 
     // --- pinned places ---
 
@@ -389,7 +431,7 @@ public sealed partial class MainPage : Page
     }
 
     private void OnCanvasDraw(CanvasControl sender, CanvasDrawEventArgs args) =>
-        _graph.Draw(sender, args.DrawingSession);
+        Active.Draw(sender, args.DrawingSession);
 
     private bool _pressedOnNode;
     private bool _minimapDragging;
@@ -400,6 +442,19 @@ public sealed partial class MainPage : Page
         var pointer = e.GetCurrentPoint(GraphCanvas);
         var props = pointer.Properties;
         Vector2 pressed = pointer.Position.ToVector2();
+
+        // Clusters view (C0): left or right drag pans; no minimap/drill/drag-move yet.
+        if (ClustersMode)
+        {
+            if (props.IsLeftButtonPressed || props.IsRightButtonPressed)
+            {
+                _isPointerDown = true;
+                _pointerMoved = false;
+                _lastPointer = pressed;
+                GraphCanvas.CapturePointer(e.Pointer);
+            }
+            return;
+        }
 
         // Right button = pan-the-view gesture (never a file-move). The context menu is
         // deferred to release-without-movement, so a drag never opens it accidentally.
@@ -441,6 +496,26 @@ public sealed partial class MainPage : Page
     private void OnCanvasPointerMoved(object sender, PointerRoutedEventArgs e)
     {
         Vector2 current = e.GetCurrentPoint(GraphCanvas).Position.ToVector2();
+
+        if (ClustersMode)
+        {
+            if (_isPointerDown)
+            {
+                Vector2 d = current - _lastPointer;
+                if (d.LengthSquared() > 4)
+                    _pointerMoved = true;
+                Active.Pan(d);
+                _lastPointer = current;
+                GraphCanvas.Invalidate();
+            }
+            else if ((current - _lastHoverPoint).LengthSquared() > 16)
+            {
+                _lastHoverPoint = current;
+                if (Active.SetHover(current))
+                    GraphCanvas.Invalidate();
+            }
+            return;
+        }
 
         if (_minimapDragging)
         {
@@ -495,6 +570,12 @@ public sealed partial class MainPage : Page
     private async void OnCanvasPointerReleased(object sender, PointerRoutedEventArgs e)
     {
         GraphCanvas.ReleasePointerCapture(e.Pointer);
+        if (ClustersMode)
+        {
+            _isPointerDown = false;
+            return;
+        }
+
         if (_minimapDragging)
         {
             _minimapDragging = false;
@@ -527,14 +608,14 @@ public sealed partial class MainPage : Page
     private void OnCanvasWheel(object sender, PointerRoutedEventArgs e)
     {
         var point = e.GetCurrentPoint(GraphCanvas);
-        _graph.Zoom(point.Properties.MouseWheelDelta, point.Position.ToVector2());
+        Active.Zoom(point.Properties.MouseWheelDelta, point.Position.ToVector2());
         GraphCanvas.Invalidate();
     }
 
     private void OnCanvasTapped(object sender, TappedRoutedEventArgs e)
     {
-        if (_pointerMoved)
-            return; // end of a pan drag, not a node click
+        if (ClustersMode || _pointerMoved)
+            return; // clusters C0 has no tap action; a moved pointer is a pan, not a click
 
         TapAt(e.GetPosition(GraphCanvas).ToVector2());
     }
@@ -678,6 +759,9 @@ public sealed partial class MainPage : Page
 
     private void OnCanvasDoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
     {
+        if (ClustersMode)
+            return; // clusters C0 has no open-on-double-tap yet
+
         // The first tap of a double-tap already fired Tapped; if it drilled, this event
         // is hitting a node on the NEW level at the same position — ignore it.
         if (DateTimeOffset.UtcNow - _lastDrill < TimeSpan.FromMilliseconds(500))
@@ -995,12 +1079,12 @@ public sealed partial class MainPage : Page
                 return "ok";
 
             case "hover":
-                _graph.SetHover(Point(1));
+                Active.SetHover(Point(1));
                 GraphCanvas.Invalidate();
                 return "ok";
 
             case "wheel": // wheel <delta> <x> <y>
-                _graph.Zoom(Arg(1), Point(2));
+                Active.Zoom(Arg(1), Point(2));
                 GraphCanvas.Invalidate();
                 return "ok";
 
@@ -1022,7 +1106,7 @@ public sealed partial class MainPage : Page
                 return "ok";
 
             case "home":
-                _graph.ZoomHome();
+                Active.ZoomHome();
                 return "ok";
 
             case "deselect":
@@ -1059,7 +1143,7 @@ public sealed partial class MainPage : Page
 
             case "nodes": // visible level in canvas coords: name | x,y | screenRadius | dir/file
             {
-                var nodes = _graph.GetVisibleNodes();
+                var nodes = Active.GetVisibleNodes();
                 return $"{nodes.Count} nodes\n" + string.Join('\n', nodes.Select(n =>
                     $"{n.Name} | {n.ScreenPosition.X:F0},{n.ScreenPosition.Y:F0} | r={n.ScreenRadius:F0} | {(n.IsDirectory ? "dir" : "file")} | {n.Frn}"));
             }
@@ -1078,9 +1162,10 @@ public sealed partial class MainPage : Page
                     case "legend": LegendToggle.IsOn = parts[2] == "on"; break;
                     case "motion": MotionToggle.IsOn = parts[2] == "on"; break;
                     case "system": SystemFoldersToggle.IsOn = parts[2] == "on"; break;
+                    case "view": SwitchView(parts[2].ToLowerInvariant() == "cells" ? "Cells" : "Clusters"); break;
                     default: return "err unknown setting";
                 }
-                return $"ok theme={_settings.Theme} legend={_settings.ShowLegend} motion={_settings.ReduceMotion} system={_settings.ShowSystemFolders}";
+                return $"ok view={_settings.ViewMode} theme={_settings.Theme} legend={_settings.ShowLegend} motion={_settings.ReduceMotion} system={_settings.ShowSystemFolders}";
 
             case "crumb": // crumb <index> — clickable-breadcrumb navigation
                 _graph.NavigateToSegment(int.Parse(parts[1]));
@@ -1105,8 +1190,8 @@ public sealed partial class MainPage : Page
             {
                 var origin = GraphCanvas.TransformToVisual(null).TransformPoint(new Windows.Foundation.Point(0, 0));
                 double scale = XamlRoot.RasterizationScale;
-                return $"breadcrumb={_graph.Breadcrumb}\ncanUp={_graph.CanGoUp}\n" +
-                    $"zoom={_graph.Camera.Zoom:F3} pan={_graph.Camera.Pan.X:F0},{_graph.Camera.Pan.Y:F0} min={_graph.Camera.MinZoom:F3}\n" +
+                return $"view={_settings.ViewMode}\nbreadcrumb={_graph.Breadcrumb}\ncanUp={_graph.CanGoUp}\n" +
+                    $"zoom={Active.Camera.Zoom:F3} pan={Active.Camera.Pan.X:F0},{Active.Camera.Pan.Y:F0} min={Active.Camera.MinZoom:F3}\n" +
                     $"selected={_graph.SelectedFrn?.ToString() ?? "none"}\n" +
                     $"relatedPanel={RelatedPanel.Visibility}\n" +
                     $"canvasOrigin={origin.X * scale:F0},{origin.Y * scale:F0} scale={scale:F2}\n" +

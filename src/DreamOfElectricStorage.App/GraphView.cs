@@ -18,7 +18,7 @@ public enum GraphColorMode { Type, Age, None }
 /// CanvasControl and forwards events; it repaints whenever <see cref="RedrawNeeded"/> fires.
 /// All animation runs on the UI thread (single-writer index contract).
 /// </summary>
-public sealed class GraphView
+public sealed class GraphView : ISceneView
 {
     private const float DirectoryRadius = 26f;
     private const float FileRadius = 12f;

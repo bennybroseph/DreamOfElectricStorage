@@ -52,6 +52,11 @@
                     <DropDownButton.Flyout>
                         <Flyout Placement="BottomEdgeAlignedLeft" Opened="OnSettingsFlyoutOpened">
                             <StackPanel Spacing="10" Width="230">
+                                <TextBlock Text="View" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                <RadioButtons x:Name="ViewChoice" SelectionChanged="OnViewChanged">
+                                    <x:String>Clusters</x:String>
+                                    <x:String>Cells</x:String>
+                                </RadioButtons>
                                 <TextBlock Text="Theme" Style="{StaticResource BodyStrongTextBlockStyle}" />
                                 <RadioButtons x:Name="ThemeChoice" SelectionChanged="OnThemeChanged">
                                     <x:String>System</x:String>

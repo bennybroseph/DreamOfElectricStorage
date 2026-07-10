@@ -17,6 +17,9 @@ public sealed class SettingsStore
     /// <summary>"System", "Light", or "Dark".</summary>
     public string Theme { get; set; } = "System";
 
+    /// <summary>"Clusters" (relationship-well map, default) or "Cells" (circle-pack hierarchy).</summary>
+    public string ViewMode { get; set; } = "Clusters";
+
     public bool ShowLegend { get; set; } = true;
 
     public bool ReduceMotion { get; set; }
