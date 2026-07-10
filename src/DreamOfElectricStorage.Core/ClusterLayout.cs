@@ -149,14 +149,24 @@ public sealed class ClusterLayout
         }
     }
 
-    /// <summary>One live relaxation tick (calm physics); dt scales the max move per step.</summary>
-    public void Step(double dt)
+    /// <summary>One live relaxation tick (calm physics); returns the largest node move.</summary>
+    public double Step(double dt)
     {
         double cap = _initialSpread * 0.04 * Math.Clamp(dt * 60.0, 0.1, 2.0);
-        Relax(cap);
+        return Relax(cap);
     }
 
-    private void Relax(double maxStep)
+    /// <summary>Pin a node to a world position (drag) — overrides forces for this node.</summary>
+    public void SetPosition(ulong id, Vector2 world)
+    {
+        if (_index.TryGetValue(id, out int i))
+        {
+            _x[i] = world.X;
+            _y[i] = world.Y;
+        }
+    }
+
+    private double Relax(double maxStep)
     {
         int n = _ids.Length;
         Array.Clear(_dx);
@@ -209,6 +219,7 @@ public sealed class ClusterLayout
         }
 
         // Integrate with a per-step cap (temperature) — keeps the relaxation stable.
+        double maxMove = 0;
         for (int i = 0; i < n; i++)
         {
             double len = Math.Sqrt(_dx[i] * _dx[i] + _dy[i] * _dy[i]);
@@ -219,7 +230,9 @@ public sealed class ClusterLayout
             }
             _x[i] += _dx[i];
             _y[i] += _dy[i];
+            maxMove = Math.Max(maxMove, Math.Sqrt(_dx[i] * _dx[i] + _dy[i] * _dy[i]));
         }
+        return maxMove;
     }
 
     /// <summary>Well descriptors (centroid + enclosing radius) for the current positions.</summary>

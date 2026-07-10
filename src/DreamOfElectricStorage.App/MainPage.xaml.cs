@@ -434,6 +434,7 @@ public sealed partial class MainPage : Page
         Active.Draw(sender, args.DrawingSession);
 
     private bool _pressedOnNode;
+    private bool _clusterDragging; // dragging a node in the Clusters view (fling, not file-move)
     private bool _minimapDragging;
     private bool _rightPanning; // right-button drag pans the view; a clean right-click opens the menu
 
@@ -443,7 +444,7 @@ public sealed partial class MainPage : Page
         var props = pointer.Properties;
         Vector2 pressed = pointer.Position.ToVector2();
 
-        // Clusters view (C0): left or right drag pans; no minimap/drill/drag-move yet.
+        // Clusters view: left-press on a node flings it; otherwise (or right button) pans.
         if (ClustersMode)
         {
             if (props.IsLeftButtonPressed || props.IsRightButtonPressed)
@@ -451,6 +452,7 @@ public sealed partial class MainPage : Page
                 _isPointerDown = true;
                 _pointerMoved = false;
                 _lastPointer = pressed;
+                _clusterDragging = props.IsLeftButtonPressed && _clusters.TryGrab(pressed);
                 GraphCanvas.CapturePointer(e.Pointer);
             }
             return;
@@ -499,7 +501,13 @@ public sealed partial class MainPage : Page
 
         if (ClustersMode)
         {
-            if (_isPointerDown)
+            if (_clusterDragging)
+            {
+                _pointerMoved = true;
+                _clusters.DragTo(current);
+                GraphCanvas.Invalidate();
+            }
+            else if (_isPointerDown)
             {
                 Vector2 d = current - _lastPointer;
                 if (d.LengthSquared() > 4)
@@ -573,6 +581,11 @@ public sealed partial class MainPage : Page
         if (ClustersMode)
         {
             _isPointerDown = false;
+            if (_clusterDragging)
+            {
+                _clusters.Release();
+                _clusterDragging = false;
+            }
             return;
         }
 
@@ -1087,6 +1100,14 @@ public sealed partial class MainPage : Page
                 Active.Zoom(Arg(1), Point(2));
                 GraphCanvas.Invalidate();
                 return "ok";
+
+            case "drag" when ClustersMode: // fling a node (no file move)
+                if (!_clusters.TryGrab(Point(1)))
+                    return "ok no-node";
+                _clusters.DragTo(Point(3));
+                _clusters.Release();
+                GraphCanvas.Invalidate();
+                return "ok flung";
 
             case "drag": // drag <x1> <y1> <x2> <y2> — full move flow; confirm dialog opens unawaited
                 if (!_graph.BeginDrag(Point(1)))
