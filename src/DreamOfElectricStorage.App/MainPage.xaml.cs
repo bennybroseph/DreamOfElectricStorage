@@ -138,7 +138,7 @@ public sealed partial class MainPage : Page
                     : $"{p.Volume} …{p.NodesIndexed:N0}");
 
             MachineIndex machine = App.DemoMode
-                ? await MachineIndex.BuildAsync(new DemoDriveIndexer(), DemoDriveIndexer.Volumes, progress: progress)
+                ? await MachineIndex.BuildAsync(new DemoDriveIndexer(App.StressCount), DemoDriveIndexer.Volumes, progress: progress)
                 : await MachineIndex.BuildAsync(new NtfsDriveIndexer(), progress: progress);
             stopwatch.Stop();
 
@@ -776,6 +776,9 @@ public sealed partial class MainPage : Page
                 return $"{nodes.Count} nodes\n" + string.Join('\n', nodes.Select(n =>
                     $"{n.Name} | {n.ScreenPosition.X:F0},{n.ScreenPosition.Y:F0} | r={n.ScreenRadius:F0} | {(n.IsDirectory ? "dir" : "file")} | {n.Frn}"));
             }
+
+            case "perf":
+                return _graph.PerfReport();
 
             case "state":
             {

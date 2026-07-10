@@ -36,6 +36,20 @@ public partial class App : Application
     public static bool BackgroundMode { get; } =
         System.Linq.Enumerable.Contains(System.Environment.GetCommandLineArgs(), "--background", System.StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>"--stress=N": adds a flat N-file dir to the demo data (perf probing).</summary>
+    public static int StressCount { get; } = ParseStress();
+
+    private static int ParseStress()
+    {
+        foreach (string arg in System.Environment.GetCommandLineArgs())
+        {
+            if (arg.StartsWith("--stress=", System.StringComparison.OrdinalIgnoreCase)
+                && int.TryParse(arg["--stress=".Length..], out int count))
+                return count;
+        }
+        return 0;
+    }
+
     private Window? _window;
 
     /// <summary>

@@ -83,7 +83,8 @@ public sealed class GraphView
         VerticalAlignment = CanvasVerticalAlignment.Top,
     };
 
-    private readonly record struct GraphNode(FileNode File, VolumeIndex Volume, Vector2 Position, float Radius, string Label);
+    // Category is cached at build time — Classify() is string work, too hot for the draw loop.
+    private readonly record struct GraphNode(FileNode File, VolumeIndex Volume, Vector2 Position, float Radius, string Label, FileTypeCategory Category);
 
     /// <summary>A node the pointer landed on. IsVolumeNode = machine-level drive circle (no real FRN).</summary>
     public readonly record struct NodeHit(VolumeIndex Volume, FileNode File, bool IsVolumeNode);
@@ -98,7 +99,7 @@ public sealed class GraphView
 
     // Child-pack previews: lazily computed per dir, budgeted per frame so a wall of
     // dirs crossing the reveal threshold can't hitch a frame.
-    private sealed record ChildPack(FileNode[] Files, Vector2[] Positions, float[] Radii, float PackRadius);
+    private sealed record ChildPack(FileNode[] Files, Vector2[] Positions, float[] Radii, FileTypeCategory[] Categories, float PackRadius);
     private readonly Dictionary<(VolumeIndex Volume, ulong Frn), ChildPack> _previewCache = [];
     private int _previewBudget;
 
@@ -126,6 +127,24 @@ public sealed class GraphView
     private bool _hasDrawn;
     private bool _pendingInitialFit;
     private readonly List<Vector4> _labelRects = [];         // per-frame world-space label rects (L,T,R,B)
+
+    // Perf probe: Draw wall time per frame + last level rebuild/pack time.
+    private readonly System.Diagnostics.Stopwatch _drawTimer = new();
+    private readonly List<double> _drawSamples = new(1024);
+    private double _lastRebuildMs;
+    private int _drawnCircles;                               // circles actually drawn last frame (post-cull)
+
+    // Sprite-batched circles (V4): one white AA circle texture, thousands of tinted
+    // instances per frame. Circles bigger than VectorCircleScreenR px stay crisp
+    // vector fills (sprites are never upscaled past their source resolution).
+    private const float SpriteSourceRadius = 64f;
+    private const float SpriteSourceSize = 144f;             // circle + AA padding
+    private const float VectorCircleScreenR = 64f;
+    private const float MinDrawScreenR = 0.35f;              // sub-pixel cutoff (radii descend → break)
+    private const int MaxCirclesPerFrame = 24000;            // biggest-first budget — only sub-px dust drops
+    private CanvasRenderTarget? _circleSprite;
+    private readonly List<(Vector2 Pos, float Radius, Color Color, float Stroke)> _ringQueue = [];
+    private readonly List<(int Index, float Radius, bool Force)> _labelQueue = [];
 #if DEBUG
     private long _frameCounter;
 #endif
@@ -239,6 +258,22 @@ public sealed class GraphView
 
     /// <summary>Drops cached child packs — live updates mutate children lists and sizes.</summary>
     public void InvalidatePreviews() => _previewCache.Clear();
+
+    /// <summary>Draw-time stats since the previous call (samples are cleared on read).</summary>
+    public string PerfReport()
+    {
+        if (_drawSamples.Count == 0)
+            return "no frames sampled (canvas idle — animate to collect)";
+
+        var sorted = _drawSamples.OrderBy(s => s).ToList();
+        double avg = sorted.Average();
+        double p95 = sorted[(int)(sorted.Count * 0.95)];
+        double max = sorted[^1];
+        string report = $"frames={sorted.Count} avgDraw={avg:F2}ms p95={p95:F2}ms max={max:F2}ms " +
+            $"nodes={_nodes.Count} drawn={_drawnCircles} lastRebuild={_lastRebuildMs:F1}ms";
+        _drawSamples.Clear();
+        return report;
+    }
 
     /// <summary>Re-pulls the current level from the (mutated) index, keeping camera + no re-entrance.</summary>
     public void RefreshLevel()
@@ -500,6 +535,7 @@ public sealed class GraphView
 
     private void RebuildLevel(bool resetCamera = true, bool animateEntrance = true)
     {
+        var rebuildTimer = System.Diagnostics.Stopwatch.StartNew();
         _nodes.Clear();
         _hoveredFrn = null;
         _selectedFrn = null;
@@ -548,7 +584,8 @@ public sealed class GraphView
         {
             var (file, volume, radius, label) = entries[i];
             _nodes.Add(new GraphNode(file, volume,
-                new Vector2((float)circles[i].X, (float)circles[i].Y), radius, label));
+                new Vector2((float)circles[i].X, (float)circles[i].Y), radius, label,
+                file.IsDirectory ? FileTypeCategory.Other : FileTypeClassifier.Classify(file.Name)));
         }
 
         if (resetCamera)
@@ -564,6 +601,7 @@ public sealed class GraphView
         else
             _entrance.Finish();
 
+        _lastRebuildMs = rebuildTimer.Elapsed.TotalMilliseconds;
         RequestFrames();
         LevelChanged?.Invoke();
     }
@@ -598,15 +636,17 @@ public sealed class GraphView
 
         var positions = new Vector2[files.Length];
         var radii = new float[files.Length];
+        var categories = new FileTypeCategory[files.Length];
         for (int i = 0; i < files.Length; i++)
         {
             positions[i] = new Vector2((float)circles[i].X, (float)circles[i].Y);
             radii[i] = (float)circles[i].R;
+            categories[i] = files[i].IsDirectory ? FileTypeCategory.Other : FileTypeClassifier.Classify(files[i].Name);
         }
 
         if (_previewCache.Count >= PreviewCacheCap)
             _previewCache.Clear();
-        var pack = new ChildPack(files, positions, radii, packRadius);
+        var pack = new ChildPack(files, positions, radii, categories, packRadius);
         _previewCache[(volume, parentFrn)] = pack;
         return pack;
     }
@@ -724,6 +764,8 @@ public sealed class GraphView
 
     public void Draw(CanvasControl canvas, CanvasDrawingSession session)
     {
+        _drawTimer.Restart();
+        _drawnCircles = 0;
         _lastViewport = new Vector2((float)canvas.ActualWidth, (float)canvas.ActualHeight);
         if (!_hasDrawn)
             _hasDrawn = true;
@@ -765,51 +807,81 @@ public sealed class GraphView
             ? 1f + 0.25f * MathF.Sin(_pulseElapsed * 10f) * MathF.Exp(-_pulseElapsed * 2.5f)
             : 1f;
 
-        for (int i = 0; i < _nodes.Count; i++)
+        // Circles go through a sprite batch (rendered when the batch is disposed);
+        // rings and labels are queued and drawn after so they sit on top.
+        if (_circleSprite is null || _circleSprite.Device != canvas.Device)
+            _circleSprite = CreateCircleSprite(canvas);
+        _ringQueue.Clear();
+        _labelQueue.Clear();
+
+        CanvasSpriteBatch? sprites = CanvasSpriteBatch.IsSupported(canvas.Device)
+            ? session.CreateSpriteBatch(CanvasSpriteSortMode.None)
+            : null;
+        try
         {
-            GraphNode node = _nodes[i];
-
-            float radius = node.Radius * EntranceScale(i) * (1f + HoverSwell * _swell.GetValueOrDefault(node.File.Id));
-            if (radius <= 0.01f)
-                continue;
-
-            // Semantic zoom: a big-enough container hollows out (fill fades, ring appears)
-            // and its children render packed inside.
-            Color nodeColor = ResolveColor(node.File, nowFileTime);
-            float reveal = node.File.IsDirectory
-                ? Math.Clamp((radius * zoom - RevealStartScreenR) / (RevealFullScreenR - RevealStartScreenR), 0f, 1f)
-                : 0f;
-            session.FillCircle(node.Position, radius, WithAlpha(nodeColor, levelAlpha * (1f - 0.72f * reveal)));
-            if (reveal > 0f)
+            for (int i = 0; i < _nodes.Count; i++)
             {
-                session.DrawCircle(node.Position, radius, WithAlpha(nodeColor, levelAlpha * (0.35f + 0.4f * reveal)), 2f / zoom);
-                DrawPreview(session, node.Volume,
-                    _currentVolume is null ? VolumeIndex.SyntheticRootId : node.File.Id,
-                    node.Position, radius, levelAlpha * reveal, zoom, nowFileTime, depth: 0);
-            }
+                GraphNode node = _nodes[i];
 
-            if (_highlightedFrn == node.File.Id && _currentVolume is not null)
-                session.DrawCircle(node.Position, (radius + 6) * pulse, WithAlpha(HighlightColor, levelAlpha), 3f / zoom);
+                if (node.Radius * zoom < MinDrawScreenR || _drawnCircles >= MaxCirclesPerFrame)
+                    break; // radii descend — what's left is sub-pixel or over budget
 
-            if (node.File.Id == anchorFrn)
-                session.DrawCircle(node.Position, (radius + 4) * (node.File.Id == _selectedFrn ? pulse : 1f),
-                    WithAlpha(RelationColor, MathF.Max(_revealAlpha, 0.4f) * levelAlpha),
-                    (_selectedFrn is not null ? 3f : 1.5f) / zoom);
-            else if (_relatedFrns.Contains(node.File.Id))
-                session.DrawCircle(node.Position, radius + 4, WithAlpha(RelationColor, _revealAlpha * levelAlpha), 2f / zoom);
+                // Viewport cull (margin covers swell + rings).
+                Vector2 screenPos = Camera.WorldToScreen(node.Position);
+                float screenR = node.Radius * zoom + 48f;
+                if (screenPos.X < -screenR || screenPos.Y < -screenR
+                    || screenPos.X > _lastViewport.X + screenR || screenPos.Y > _lastViewport.Y + screenR)
+                    continue;
 
-            if (_dropTargetFrn == node.File.Id)
-                session.DrawCircle(node.Position, radius + 8, DropTargetColor, 4f / zoom);
+                float swell = _swell.Count > 0 ? _swell.GetValueOrDefault(node.File.Id) : 0f;
+                float radius = node.Radius * EntranceScale(i) * (1f + HoverSwell * swell);
+                if (radius <= 0.01f)
+                    continue;
 
-            if (radius * zoom >= LabelMinScreenRadius)
-            {
-                // Packed layouts collide labels constantly — greedy declutter: nodes are
-                // iterated biggest-first, so big nodes claim label space and overlapping
-                // labels are skipped. The anchor/highlight label always draws.
-                TryDrawLabel(session, i, radius, levelAlpha,
-                    force: node.File.Id == anchorFrn || node.File.Id == _highlightedFrn);
+                // Semantic zoom: a big-enough container hollows out (fill fades, ring
+                // appears) and its children render packed inside.
+                Color nodeColor = ResolveColor(node.File, node.Category, nowFileTime);
+                float reveal = node.File.IsDirectory
+                    ? Math.Clamp((radius * zoom - RevealStartScreenR) / (RevealFullScreenR - RevealStartScreenR), 0f, 1f)
+                    : 0f;
+                DrawNodeCircle(sprites, session, node.Position, radius, WithAlpha(nodeColor, levelAlpha * (1f - 0.72f * reveal)), zoom);
+                if (reveal > 0f)
+                {
+                    _ringQueue.Add((node.Position, radius, WithAlpha(nodeColor, levelAlpha * (0.35f + 0.4f * reveal)), 2f / zoom));
+                    DrawPreview(sprites, session, node.Volume,
+                        _currentVolume is null ? VolumeIndex.SyntheticRootId : node.File.Id,
+                        node.Position, radius, levelAlpha * reveal, zoom, nowFileTime, depth: 0);
+                }
+
+                if (_highlightedFrn == node.File.Id && _currentVolume is not null)
+                    _ringQueue.Add((node.Position, (radius + 6) * pulse, WithAlpha(HighlightColor, levelAlpha), 3f / zoom));
+
+                if (node.File.Id == anchorFrn)
+                    _ringQueue.Add((node.Position, (radius + 4) * (node.File.Id == _selectedFrn ? pulse : 1f),
+                        WithAlpha(RelationColor, MathF.Max(_revealAlpha, 0.4f) * levelAlpha),
+                        (_selectedFrn is not null ? 3f : 1.5f) / zoom));
+                else if (_relatedFrns.Count > 0 && _relatedFrns.Contains(node.File.Id))
+                    _ringQueue.Add((node.Position, radius + 4, WithAlpha(RelationColor, _revealAlpha * levelAlpha), 2f / zoom));
+
+                if (_dropTargetFrn == node.File.Id)
+                    _ringQueue.Add((node.Position, radius + 8, DropTargetColor, 4f / zoom));
+
+                if (radius * zoom >= LabelMinScreenRadius)
+                    _labelQueue.Add((i, radius, node.File.Id == anchorFrn || node.File.Id == _highlightedFrn));
             }
         }
+        finally
+        {
+            sprites?.Dispose(); // sprites render here, above the edges, below rings/labels
+        }
+
+        foreach (var (pos, r, color, stroke) in _ringQueue)
+            session.DrawCircle(pos, r, color, stroke);
+
+        // Greedy label declutter: queue is biggest-first, so big nodes claim label
+        // space and overlapping labels are skipped. Anchor/highlight always draws.
+        foreach (var (index, radius, force) in _labelQueue)
+            TryDrawLabel(session, index, radius, levelAlpha, force, zoom);
 
 #if DEBUG
         // Diagnostic overlay (debug builds only): live camera/clock numbers for the harness.
@@ -829,6 +901,37 @@ public sealed class GraphView
             session.FillCircle(_dragGhostScreen, 14, ghost);
             session.DrawText(drag.File.Name, _dragGhostScreen + new Vector2(0, 18), LabelColor, LabelFormat);
         }
+
+        _drawTimer.Stop();
+        if (_drawSamples.Count < 4096)
+            _drawSamples.Add(_drawTimer.Elapsed.TotalMilliseconds);
+    }
+
+    /// <summary>One tinted circle: sprite instance when small, crisp vector fill when big.</summary>
+    private void DrawNodeCircle(CanvasSpriteBatch? sprites, CanvasDrawingSession session,
+        Vector2 pos, float radius, Color color, float zoom)
+    {
+        _drawnCircles++;
+        if (sprites is null || _circleSprite is null || radius * zoom >= VectorCircleScreenR)
+        {
+            session.FillCircle(pos, radius, color);
+            return;
+        }
+
+        // Dest rect sized so the texture's circle (not its padding) lands at `radius`.
+        float extent = radius * (SpriteSourceSize / 2f) / SpriteSourceRadius;
+        sprites.Draw(_circleSprite,
+            new Windows.Foundation.Rect(pos.X - extent, pos.Y - extent, extent * 2, extent * 2),
+            new Vector4(color.R, color.G, color.B, color.A) / 255f);
+    }
+
+    private static CanvasRenderTarget CreateCircleSprite(CanvasControl canvas)
+    {
+        var target = new CanvasRenderTarget(canvas.Device, SpriteSourceSize, SpriteSourceSize, 96);
+        using CanvasDrawingSession session = target.CreateDrawingSession();
+        session.Clear(Color.FromArgb(0, 0, 0, 0));
+        session.FillCircle(SpriteSourceSize / 2f, SpriteSourceSize / 2f, SpriteSourceRadius, Color.FromArgb(255, 255, 255, 255));
+        return target;
     }
 
     /// <summary>
@@ -836,7 +939,7 @@ public sealed class GraphView
     /// enough on screen. Hard-culled: sub-1.4px children stop the loop (radii descend),
     /// offscreen children are skipped.
     /// </summary>
-    private void DrawPreview(CanvasDrawingSession session, VolumeIndex volume, ulong parentFrn,
+    private void DrawPreview(CanvasSpriteBatch? sprites, CanvasDrawingSession session, VolumeIndex volume, ulong parentFrn,
         Vector2 center, float drawnRadius, float alpha, float zoom, long nowFileTime, int depth)
     {
         if (depth >= MaxPreviewDepth || alpha <= 0.03f)
@@ -860,20 +963,20 @@ public sealed class GraphView
                 continue;
 
             FileNode file = pack.Files[i];
-            Color color = ResolveColor(file, nowFileTime);
+            Color color = ResolveColor(file, pack.Categories[i], nowFileTime);
             float childReveal = file.IsDirectory
                 ? Math.Clamp((screenR - RevealStartScreenR) / (RevealFullScreenR - RevealStartScreenR), 0f, 1f)
                 : 0f;
-            session.FillCircle(pos, r, WithAlpha(color, alpha * (1f - 0.72f * childReveal)));
+            DrawNodeCircle(sprites, session, pos, r, WithAlpha(color, alpha * (1f - 0.72f * childReveal)), zoom);
             if (childReveal > 0f)
             {
-                session.DrawCircle(pos, r, WithAlpha(color, alpha * (0.35f + 0.4f * childReveal)), 2f / zoom);
-                DrawPreview(session, volume, file.Id, pos, r, alpha * childReveal, zoom, nowFileTime, depth + 1);
+                _ringQueue.Add((pos, r, WithAlpha(color, alpha * (0.35f + 0.4f * childReveal)), 2f / zoom));
+                DrawPreview(sprites, session, volume, file.Id, pos, r, alpha * childReveal, zoom, nowFileTime, depth + 1);
             }
         }
     }
 
-    private void TryDrawLabel(CanvasDrawingSession session, int index, float radius, float levelAlpha, bool force)
+    private void TryDrawLabel(CanvasDrawingSession session, int index, float radius, float levelAlpha, bool force, float zoom)
     {
         GraphNode node = _nodes[index];
         float width = node.Label.Length * LabelFormat.FontSize * 0.52f; // estimate — cheap and close enough for collision
@@ -885,7 +988,7 @@ public sealed class GraphView
         {
             float left = node.Position.X - width / 2;
             var rect = new Vector4(left, top, left + width, top + height);
-            if (force || LabelSpotFree(rect, index))
+            if (force || LabelSpotFree(rect, index, zoom))
             {
                 _labelRects.Add(rect);
                 session.DrawText(node.Label, new Vector2(node.Position.X, top), WithAlpha(LabelColor, levelAlpha), LabelFormat);
@@ -894,7 +997,7 @@ public sealed class GraphView
         }
     }
 
-    private bool LabelSpotFree(Vector4 rect, int index)
+    private bool LabelSpotFree(Vector4 rect, int index, float zoom)
     {
         foreach (Vector4 other in _labelRects)
         {
@@ -906,6 +1009,8 @@ public sealed class GraphView
         // circles curve away). Dense levels keep edge labels; hover reveals the rest.
         for (int j = 0; j < _nodes.Count; j++)
         {
+            if (_nodes[j].Radius * zoom < 3f)
+                break; // radii descend — text over sub-3px specks reads fine
             if (j == index)
                 continue;
             Vector2 p = _nodes[j].Position;
@@ -930,7 +1035,10 @@ public sealed class GraphView
     private static Color WithAlpha(Color color, float alpha) =>
         alpha >= 0.999f ? color : Color.FromArgb((byte)(color.A * Math.Clamp(alpha, 0f, 1f)), color.R, color.G, color.B);
 
-    private Color ResolveColor(FileNode file, long nowFileTime)
+    private Color ResolveColor(FileNode file, long nowFileTime) =>
+        ResolveColor(file, file.IsDirectory ? FileTypeCategory.Other : FileTypeClassifier.Classify(file.Name), nowFileTime);
+
+    private Color ResolveColor(FileNode file, FileTypeCategory category, long nowFileTime)
     {
         if (file.IsDirectory)
             return DirectoryColor;
@@ -938,7 +1046,6 @@ public sealed class GraphView
         switch (ColorMode)
         {
             case GraphColorMode.Type:
-                FileTypeCategory category = FileTypeClassifier.Classify(file.Name);
                 foreach (var (cat, _, color) in TypePalette)
                 {
                     if (cat == category)

@@ -6,7 +6,7 @@ namespace DreamOfElectricStorage.Core;
 /// Sizes ride the stream and timestamps are set on the nodes directly, so the graph
 /// gets size-scaled nodes, age colors, duplicates, and similar-name groups to show off.
 /// </summary>
-public sealed class DemoDriveIndexer : IDriveIndexer
+public sealed class DemoDriveIndexer(int stressFiles = 0) : IDriveIndexer
 {
     public static readonly IReadOnlyList<string> Volumes = ["C:", "D:"];
 
@@ -24,7 +24,7 @@ public sealed class DemoDriveIndexer : IDriveIndexer
         await Task.CompletedTask;
     }
 
-    private static List<FileNode> BuildVolume(string volume) => volume.StartsWith('C') ? BuildC() : BuildD();
+    private List<FileNode> BuildVolume(string volume) => volume.StartsWith('C') ? BuildC() : BuildD(stressFiles);
 
     // FRN scheme: directories get low ids per volume, files count up from 1000. Parent 5 = root.
     private static List<FileNode> BuildC()
@@ -65,7 +65,7 @@ public sealed class DemoDriveIndexer : IDriveIndexer
         return nodes;
     }
 
-    private static List<FileNode> BuildD()
+    private static List<FileNode> BuildD(int stressFiles)
     {
         var nodes = new List<FileNode>();
         ulong nextFile = 1000;
@@ -82,6 +82,20 @@ public sealed class DemoDriveIndexer : IDriveIndexer
 
         Dir(nodes, 30, 5, "Archive");
         Files(nodes, ref nextFile, 30, 60, i => ($"snapshot-{i:D3}.zip", 90_000_000L + i * 3_000_000L, AgeDays(365 + i * 10)));
+
+        if (stressFiles > 0)
+        {
+            // Perf-probe dir: one flat directory with N deterministic pseudo-random files
+            // (Knuth-hash sizes across 5 decades, rotating extensions for color variety).
+            Dir(nodes, 40, 5, "Stress");
+            string[] exts = [".jpg", ".mp4", ".dll", ".txt", ".zip", ".cs", ".png", ".exe"];
+            Files(nodes, ref nextFile, 40, stressFiles, i =>
+            {
+                uint hash = (uint)i * 2654435761u;
+                long size = 1_000L << (int)(hash % 17);          // 1 KB .. 65 GB, log-distributed
+                return ($"stress-{i:D6}{exts[i % exts.Length]}", size + hash % 999, AgeDays(hash % 1500));
+            });
+        }
 
         return nodes;
     }
