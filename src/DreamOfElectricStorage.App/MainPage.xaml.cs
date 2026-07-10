@@ -47,6 +47,10 @@ public sealed partial class MainPage : Page
         Loaded += OnPageLoaded;
         RefreshLegend();
 
+        // Page-scoped accelerators auto-present a key tooltip ("Home") that shows on launch
+        // and lingers; suppress it — these shortcuts aren't tied to a visible control.
+        KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden;
+
         var homeKey = new Microsoft.UI.Xaml.Input.KeyboardAccelerator { Key = Windows.System.VirtualKey.Home };
         homeKey.Invoked += (_, args) =>
         {
@@ -77,6 +81,7 @@ public sealed partial class MainPage : Page
         // inside an unopened Flyout silently drops SelectedIndex — its items don't exist yet).
         LegendToggle.IsOn = _settings.ShowLegend;
         MotionToggle.IsOn = _settings.ReduceMotion;
+        SystemFoldersToggle.IsOn = _settings.ShowSystemFolders;
         _settingsUiReady = true;
         ActualThemeChanged += (_, _) => ApplyCanvasTheme();
         ApplySettings();
@@ -110,6 +115,7 @@ public sealed partial class MainPage : Page
         LegendPanel.Visibility = _settings.ShowLegend && _graph.ColorMode != GraphColorMode.None
             ? Visibility.Visible : Visibility.Collapsed;
         _graph.ReduceMotion = _settings.ReduceMotion;
+        _graph.ShowSystemFolders = _settings.ShowSystemFolders;
         GraphCanvas.Invalidate();
     }
 
@@ -147,6 +153,15 @@ public sealed partial class MainPage : Page
         if (!_settingsUiReady)
             return;
         _settings.ReduceMotion = MotionToggle.IsOn;
+        _settings.Save();
+        ApplySettings();
+    }
+
+    private void OnSystemFoldersToggled(object sender, RoutedEventArgs e)
+    {
+        if (!_settingsUiReady)
+            return;
+        _settings.ShowSystemFolders = SystemFoldersToggle.IsOn;
         _settings.Save();
         ApplySettings();
     }
@@ -377,12 +392,41 @@ public sealed partial class MainPage : Page
         _graph.Draw(sender, args.DrawingSession);
 
     private bool _pressedOnNode;
+    private bool _minimapDragging;
+    private bool _rightPanning; // right-button drag pans the view; a clean right-click opens the menu
 
     private void OnCanvasPointerPressed(object sender, PointerRoutedEventArgs e)
     {
-        Vector2 pressed = e.GetCurrentPoint(GraphCanvas).Position.ToVector2();
+        var pointer = e.GetCurrentPoint(GraphCanvas);
+        var props = pointer.Properties;
+        Vector2 pressed = pointer.Position.ToVector2();
+
+        // Right button = pan-the-view gesture (never a file-move). The context menu is
+        // deferred to release-without-movement, so a drag never opens it accidentally.
+        if (props.IsRightButtonPressed)
+        {
+            _isPointerDown = true;
+            _rightPanning = true;
+            _pressedOnNode = false;
+            _pointerMoved = false;
+            _lastPointer = pressed;
+            GraphCanvas.CapturePointer(e.Pointer);
+            return;
+        }
+
+        // Left button (or touch/pen primary) only for pan / minimap / drag-move. Middle ignored.
+        if (!props.IsLeftButtonPressed)
+            return;
+
         if (_graph.IsInMinimap(pressed))
-            return; // minimap click = jump (handled in TapAt); never a pan/drag
+        {
+            // Press-and-drag the minimap to scrub the view (a plain click still jumps via TapAt).
+            _minimapDragging = true;
+            _graph.MinimapScrub(pressed);
+            GraphCanvas.CapturePointer(e.Pointer);
+            GraphCanvas.Invalidate();
+            return;
+        }
 
         _isPointerDown = true;
         _pointerMoved = false;
@@ -397,6 +441,13 @@ public sealed partial class MainPage : Page
     private void OnCanvasPointerMoved(object sender, PointerRoutedEventArgs e)
     {
         Vector2 current = e.GetCurrentPoint(GraphCanvas).Position.ToVector2();
+
+        if (_minimapDragging)
+        {
+            _graph.MinimapScrub(current);
+            GraphCanvas.Invalidate();
+            return;
+        }
 
         if (!_isPointerDown)
         {
@@ -413,6 +464,14 @@ public sealed partial class MainPage : Page
         Vector2 delta = current - _lastPointer;
         if (delta.LengthSquared() > 4)
             _pointerMoved = true; // a drag, not a click
+
+        if (_rightPanning)
+        {
+            _graph.Pan(delta); // right-drag always pans (never drag-moves a node)
+            _lastPointer = current;
+            GraphCanvas.Invalidate();
+            return;
+        }
 
         if (_graph.IsDragging)
         {
@@ -435,9 +494,26 @@ public sealed partial class MainPage : Page
 
     private async void OnCanvasPointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        GraphCanvas.ReleasePointerCapture(e.Pointer);
+        if (_minimapDragging)
+        {
+            _minimapDragging = false;
+            return;
+        }
+
+        if (_rightPanning)
+        {
+            _rightPanning = false;
+            _isPointerDown = false;
+            // A right-click that didn't drag opens the context menu (fires on up, so a
+            // drag attempt never triggers it).
+            if (!_pointerMoved)
+                RightTapAt(e.GetCurrentPoint(GraphCanvas).Position);
+            return;
+        }
+
         _isPointerDown = false;
         _pressedOnNode = false;
-        GraphCanvas.ReleasePointerCapture(e.Pointer);
 
         if (!_graph.IsDragging)
             return;
@@ -617,12 +693,10 @@ public sealed partial class MainPage : Page
             OpenPath(hit.Volume.GetPath(hit.File.Id));
     }
 
-    private void OnCanvasRightTapped(object sender, RightTappedRoutedEventArgs e)
-    {
-        RightTapAt(e.GetPosition(GraphCanvas));
-    }
-
-    /// <summary>Shared right-tap path (real event + test channel): node context menu.</summary>
+    /// <summary>
+    /// Node context menu, opened from a clean right-click (PointerReleased without a drag)
+    /// and the test channel. Not wired to native RightTapped — right-drag pans instead.
+    /// </summary>
     private void RightTapAt(Windows.Foundation.Point position)
     {
         if (_graph.TryGetNodeAt(position.ToVector2()) is not { IsVolumeNode: false } hit)
@@ -1003,9 +1077,10 @@ public sealed partial class MainPage : Page
                         break;
                     case "legend": LegendToggle.IsOn = parts[2] == "on"; break;
                     case "motion": MotionToggle.IsOn = parts[2] == "on"; break;
+                    case "system": SystemFoldersToggle.IsOn = parts[2] == "on"; break;
                     default: return "err unknown setting";
                 }
-                return $"ok theme={_settings.Theme} legend={_settings.ShowLegend} motion={_settings.ReduceMotion}";
+                return $"ok theme={_settings.Theme} legend={_settings.ShowLegend} motion={_settings.ReduceMotion} system={_settings.ShowSystemFolders}";
 
             case "crumb": // crumb <index> — clickable-breadcrumb navigation
                 _graph.NavigateToSegment(int.Parse(parts[1]));

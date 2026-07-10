@@ -32,7 +32,7 @@ public static class Drv {
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
   public struct RECT { public int L, T, R, B; }
   public struct POINT { public int X, Y; }
-  public const uint MOVE = 0x01, ABSOLUTE = 0x8000, LEFTDOWN = 0x02, LEFTUP = 0x04, RIGHTDOWN = 0x08, RIGHTUP = 0x10, WHEEL = 0x800, KEYUP = 0x2;
+  public const uint MOVE = 0x01, ABSOLUTE = 0x8000, LEFTDOWN = 0x02, LEFTUP = 0x04, RIGHTDOWN = 0x08, RIGHTUP = 0x10, MIDDLEDOWN = 0x20, MIDDLEUP = 0x40, WHEEL = 0x800, KEYUP = 0x2;
   [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
 }
 '@
@@ -123,6 +123,22 @@ switch ($Action.ToLowerInvariant()) {
         }
         [Drv]::mouse_event([Drv]::LEFTUP, 0, 0, 0, [IntPtr]::Zero)
         Write-Output "dragged"
+    }
+    "btndrag"    {
+        # btndrag <left|middle|right> x1 y1 x2 y2 — drag with a specific button (verifies
+        # button gating: only left should pan/move-drag).
+        $down = switch ($Rest[0]) { "middle" { [Drv]::MIDDLEDOWN } "right" { [Drv]::RIGHTDOWN } default { [Drv]::LEFTDOWN } }
+        $up = switch ($Rest[0]) { "middle" { [Drv]::MIDDLEUP } "right" { [Drv]::RIGHTUP } default { [Drv]::LEFTUP } }
+        MoveTo ([int]$Rest[1]) ([int]$Rest[2])
+        [Drv]::mouse_event($down, 0, 0, 0, [IntPtr]::Zero)
+        $steps = 12
+        for ($i = 1; $i -le $steps; $i++) {
+            $x = [int]($Rest[1]) + ([int]($Rest[3]) - [int]($Rest[1])) * $i / $steps
+            $y = [int]($Rest[2]) + ([int]($Rest[4]) - [int]($Rest[2])) * $i / $steps
+            MoveTo ([int]$x) ([int]$y)
+        }
+        [Drv]::mouse_event($up, 0, 0, 0, [IntPtr]::Zero)
+        Write-Output "btndrag $($Rest[0])"
     }
     "key"        {
         [Drv]::keybd_event([byte][int]$Rest[0], 0, 0, [IntPtr]::Zero)

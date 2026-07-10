@@ -71,13 +71,25 @@ public sealed class GraphCamera
         _panTarget = Pan;
     }
 
-    /// <summary>Animated zoom about the cursor. Targets computed from target state so repeated wheel ticks compose.</summary>
-    public void ZoomAboutPoint(float wheelDelta, Vector2 screenCenter)
+    /// <summary>Screen point of the last zoom-in (cursor) — the drill anchor.</summary>
+    public Vector2 ZoomFocus { get; private set; }
+
+    /// <summary>
+    /// Animated zoom about the cursor. Targets computed from target state so repeated
+    /// wheel ticks compose. Returns true when a zoom-IN was clamped at MaxZoom (the user
+    /// wants to go deeper but can't) — the signal to re-root into the focused folder.
+    /// </summary>
+    public bool ZoomAboutPoint(float wheelDelta, Vector2 screenCenter)
     {
+        if (wheelDelta > 0)
+            ZoomFocus = screenCenter;
+
         float factor = MathF.Pow(1.001f, wheelDelta);
         float newZoom = Math.Clamp(_zoomTarget * factor, MinZoom, MaxZoom);
+        bool clampedIn = wheelDelta > 0 && newZoom <= _zoomTarget + 1e-4f;
         _panTarget = screenCenter - (screenCenter - _panTarget) * (newZoom / _zoomTarget);
         _zoomTarget = newZoom;
+        return clampedIn;
     }
 
     /// <summary>

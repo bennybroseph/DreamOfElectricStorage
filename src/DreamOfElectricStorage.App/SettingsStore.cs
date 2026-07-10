@@ -21,6 +21,17 @@ public sealed class SettingsStore
 
     public bool ReduceMotion { get; set; }
 
+    /// <summary>Show NTFS system/metadata roots ($Recycle.Bin, System Volume Information).</summary>
+    public bool ShowSystemFolders { get; set; }
+
+    // Window placement — restored on launch. Bounds are the *restored* (un-maximized)
+    // rectangle; WindowMaximized is applied on top. Zero W/H = "never saved, use default".
+    public bool WindowMaximized { get; set; }
+    public int WindowWidth { get; set; }
+    public int WindowHeight { get; set; }
+    public int WindowX { get; set; }
+    public int WindowY { get; set; }
+
     public static SettingsStore Load()
     {
         try

@@ -65,9 +65,15 @@ public partial class App : Application
     /// Invoked when the application is launched.
     /// </summary>
     /// <param name="args">Details about the launch request and process.</param>
+    private SettingsStore? _settings;
+
     protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
     {
         _window = new MainWindow();
+        _settings = SettingsStore.Load();
+        RestoreWindowPlacement(_window.AppWindow);
+        _window.AppWindow.Closing += (s, _) => SaveWindowPlacement(s);
+
         if (BackgroundMode)
         {
             _window.AppWindow.Show(activateWindow: false);
@@ -77,6 +83,35 @@ public partial class App : Application
         {
             _window.Activate();
         }
+    }
+
+    private void RestoreWindowPlacement(Microsoft.UI.Windowing.AppWindow appWindow)
+    {
+        if (_settings is null)
+            return;
+        if (_settings.WindowWidth > 0 && _settings.WindowHeight > 0)
+        {
+            appWindow.MoveAndResize(new Windows.Graphics.RectInt32(
+                _settings.WindowX, _settings.WindowY, _settings.WindowWidth, _settings.WindowHeight));
+        }
+        if (_settings.WindowMaximized && appWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter presenter)
+            presenter.Maximize();
+    }
+
+    private void SaveWindowPlacement(Microsoft.UI.Windowing.AppWindow appWindow)
+    {
+        if (_settings is null)
+            return;
+        bool maximized = appWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter { State: Microsoft.UI.Windowing.OverlappedPresenterState.Maximized };
+        _settings.WindowMaximized = maximized;
+        if (!maximized) // capture the restored rectangle only when not maximized
+        {
+            _settings.WindowWidth = appWindow.Size.Width;
+            _settings.WindowHeight = appWindow.Size.Height;
+            _settings.WindowX = appWindow.Position.X;
+            _settings.WindowY = appWindow.Position.Y;
+        }
+        _settings.Save();
     }
 
     private static void SendToBottom(Window window)

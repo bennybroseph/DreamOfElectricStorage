@@ -60,6 +60,7 @@
                                 </RadioButtons>
                                 <ToggleSwitch x:Name="LegendToggle" Header="Show legend" Toggled="OnLegendToggled" />
                                 <ToggleSwitch x:Name="MotionToggle" Header="Reduce motion" Toggled="OnMotionToggled" />
+                                <ToggleSwitch x:Name="SystemFoldersToggle" Header="Show system folders" Toggled="OnSystemFoldersToggled" />
                             </StackPanel>
                         </Flyout>
                     </DropDownButton.Flyout>
@@ -113,8 +114,7 @@
                 PointerReleased="OnCanvasPointerReleased"
                 PointerWheelChanged="OnCanvasWheel"
                 Tapped="OnCanvasTapped"
-                DoubleTapped="OnCanvasDoubleTapped"
-                RightTapped="OnCanvasRightTapped" />
+                DoubleTapped="OnCanvasDoubleTapped" />
 
             <!-- Map-style legend overlay (toggleable in settings) — keeps the toolbar free. -->
             <Border Grid.Column="0" HorizontalAlignment="Left" VerticalAlignment="Bottom"

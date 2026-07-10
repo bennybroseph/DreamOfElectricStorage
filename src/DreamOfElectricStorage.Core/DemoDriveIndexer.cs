@@ -55,6 +55,11 @@ public sealed class DemoDriveIndexer(int stressFiles = 0) : IDriveIndexer
         Files(nodes, ref nextFile, 21, 4, i => ($"data-{i}.pak", 2_000_000_000L + i * 350_000_000L, AgeDays(200)));
         File(nodes, ref nextFile, 21, "game.exe", 48_000_000, AgeDays(200));
 
+        // NTFS system roots — hidden by default, shown via the "system folders" setting.
+        Dir(nodes, 50, 5, "$Recycle.Bin");
+        File(nodes, ref nextFile, 50, "$IABCDEF.tmp", 0, AgeDays(5));
+        Dir(nodes, 51, 5, "System Volume Information");
+
         Dir(nodes, 30, 5, "Users");
         Dir(nodes, 31, 30, "benny");
 

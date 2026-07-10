@@ -98,6 +98,9 @@ public sealed class GraphView
     private float _levelRadius;                              // enclosing circle of the packed level
     private ulong? _highlightedFrn;
 
+    private bool _wheelZoomActive; // a wheel zoom-in is in flight (scopes auto-drill to the wheel gesture)
+    private bool _wheeledInAtMax;  // one-shot: user wheeled in while clamped at MaxZoom
+
     // Child-pack previews: lazily computed per dir, budgeted per frame so a wall of
     // dirs crossing the reveal threshold can't hitch a frame.
     private sealed record ChildPack(FileNode[] Files, Vector2[] Positions, float[] Radii, FileTypeCategory[] Categories, string?[] Paths, float PackRadius);
@@ -191,6 +194,21 @@ public sealed class GraphView
 
     /// <summary>Canvas chrome follows the app theme (node palettes work on both).</summary>
     public bool LightTheme { get; set; }
+
+    private bool _showSystemFolders;
+    /// <summary>Show NTFS system/metadata roots ($Recycle.Bin, System Volume Information, …).</summary>
+    public bool ShowSystemFolders
+    {
+        get => _showSystemFolders;
+        set
+        {
+            if (_showSystemFolders == value)
+                return;
+            _showSystemFolders = value;
+            _previewCache.Clear();
+            RebuildLevel(resetCamera: false, animateEntrance: false);
+        }
+    }
 
     private bool _reduceMotion;
     public bool ReduceMotion
@@ -635,7 +653,12 @@ public sealed class GraphView
 
     public void Zoom(float wheelDelta, Vector2 screenCenter)
     {
-        Camera.ZoomAboutPoint(wheelDelta, screenCenter);
+        // Auto-drill is a WHEEL gesture only (a fly-in from search/navigate also zooms in
+        // but shouldn't drill). A zoom-in clamped at MaxZoom = "deeper, but can't" → rescue.
+        bool clampedIn = Camera.ZoomAboutPoint(wheelDelta, screenCenter);
+        _wheelZoomActive = wheelDelta > 0;
+        if (clampedIn)
+            _wheeledInAtMax = true;
         RequestFrames();
     }
 
@@ -662,12 +685,16 @@ public sealed class GraphView
     /// <summary>Transient hover reveal + swell. Returns true when the visual state changed.</summary>
     public bool SetHover(Vector2 screenPoint)
     {
-        ulong? frn = TryGetNodeAt(screenPoint) is { IsVolumeNode: false } hit ? hit.File.Id : null;
+        // No node hover while over the minimap (its screen region overlaps world nodes).
+        ulong? frn = !IsInMinimap(screenPoint) && TryGetNodeAt(screenPoint) is { IsVolumeNode: false } hit
+            ? hit.File.Id : null;
         if (frn == _hoveredFrn)
             return false;
 
         _hoveredFrn = frn;
-        _hoverDwell = 0f; // peek dwell restarts on every hover change
+        // Restart dwell only when the peek isn't already up; moving directly between nodes
+        // keeps it shown (swap content) instead of fading fully out and back in.
+        _hoverDwell = _peekAlpha > 0.5f ? PeekDwellSeconds : 0f;
         if (frn is { } f)
             _swell.TryAdd(f, _swell.GetValueOrDefault(f));
         RecomputeRelated();
@@ -779,10 +806,18 @@ public sealed class GraphView
         LevelChanged?.Invoke();
     }
 
-    private static IEnumerable<FileNode> OrderChildren(IEnumerable<FileNode> children) => children
-        .OrderByDescending(c => c.SizeBytes)
-        .ThenByDescending(c => c.IsDirectory)
-        .ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase);
+    private IEnumerable<FileNode> OrderChildren(IEnumerable<FileNode> children)
+    {
+        IEnumerable<FileNode> ordered = ShowSystemFolders ? children : children.Where(c => !IsSystemEntry(c.Name));
+        return ordered
+            .OrderByDescending(c => c.SizeBytes)
+            .ThenByDescending(c => c.IsDirectory)
+            .ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>NTFS system/metadata roots (e.g. $Recycle.Bin, System Volume Information).</summary>
+    private static bool IsSystemEntry(string name) =>
+        name.StartsWith('$') || name.Equals("System Volume Information", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Cached deterministic pack of a dir's children (same ordering/radii as a real level).</summary>
     private ChildPack? GetPreview(VolumeIndex volume, ulong parentFrn)
@@ -836,31 +871,57 @@ public sealed class GraphView
     /// </summary>
     private void EvaluateAutoNavigation()
     {
-        if (_machine is null || _pendingLevelSwap is not null || _dragSource is not null
-            || !_hasDrawn || Camera.Settled)
+        // Note: NOT gated on Camera.Settled — the max-zoom rescue must fire while the
+        // camera sits clamped at MaxZoom and the user keeps wheeling in.
+        if (_machine is null || _pendingLevelSwap is not null || _dragSource is not null || !_hasDrawn)
             return;
 
         float minVp = MathF.Min(_lastViewport.X, _lastViewport.Y);
         float zoom = Camera.Zoom;
+        bool zoomingIn = Camera.ZoomTarget > zoom;
 
-        if (Camera.ZoomTarget > zoom)
+        if (!zoomingIn)
+            _wheelZoomActive = false; // the inward flight ended (settled or reversed)
+
+        if ((zoomingIn && _wheelZoomActive) || _wheeledInAtMax)
         {
-            Vector2 centerWorld = Camera.ScreenToWorld(_lastViewport / 2f);
-            foreach (GraphNode node in _nodes)
+            // Anchor on the cursor (last zoom focus), not the viewport center — wheel
+            // zooms about the cursor, so the folder you're pointing at is the target.
+            GraphNode? target = DirectoryContaining(Camera.ScreenToWorld(Camera.ZoomFocus));
+            if (target is { } node)
             {
-                if (!node.File.IsDirectory
-                    || node.Radius * zoom < AutoDrillViewportFrac * minVp
-                    || Vector2.DistanceSquared(centerWorld, node.Position) > node.Radius * node.Radius)
-                    continue;
-                AutoDrillInto(node);
-                return;
+                // Normal: folder has grown to fill the viewport. Rescue: user is jammed
+                // against MaxZoom on a folder too small to ever reach that fill.
+                bool fills = node.Radius * zoom >= AutoDrillViewportFrac * minVp;
+                if (fills || _wheeledInAtMax)
+                {
+                    _wheeledInAtMax = false;
+                    AutoDrillInto(node);
+                    return;
+                }
             }
+            _wheeledInAtMax = false; // stale intent (cursor left every folder) — drop it
         }
         else if (Camera.ZoomTarget < zoom && _currentVolume is not null
             && _levelRadius * zoom < AutoUpViewportFrac * minVp)
         {
             AutoGoUp();
         }
+    }
+
+    /// <summary>Smallest directory node whose circle contains the world point, or null.</summary>
+    private GraphNode? DirectoryContaining(Vector2 world)
+    {
+        GraphNode? best = null;
+        foreach (GraphNode node in _nodes)
+        {
+            if (!node.File.IsDirectory)
+                continue;
+            if (Vector2.DistanceSquared(world, node.Position) <= node.Radius * node.Radius
+                && (best is not { } b || node.Radius < b.Radius))
+                best = node;
+        }
+        return best;
     }
 
     private void AutoDrillInto(GraphNode node)
@@ -1159,12 +1220,23 @@ public sealed class GraphView
     {
         if (!IsInMinimap(canvasPoint))
             return false;
+        MinimapPanTo(canvasPoint, fly: true);
+        return true;
+    }
 
+    /// <summary>Crisp 1:1 pan to a minimap point — used while scrubbing the minimap.</summary>
+    public void MinimapScrub(Vector2 canvasPoint) => MinimapPanTo(canvasPoint, fly: false);
+
+    private void MinimapPanTo(Vector2 canvasPoint, bool fly)
+    {
         var (center, scale) = MinimapTransform();
         Vector2 world = (canvasPoint - center) / scale;
-        Camera.FlyTo(_lastViewport / 2f - world * Camera.Zoom, Camera.Zoom);
+        Vector2 pan = _lastViewport / 2f - world * Camera.Zoom;
+        if (fly)
+            Camera.FlyTo(pan, Camera.Zoom);
+        else
+            Camera.JumpTo(pan, Camera.Zoom);
         RequestFrames();
-        return true;
     }
 
     public bool IsInMinimap(Vector2 canvasPoint)
@@ -1315,9 +1387,13 @@ public sealed class GraphView
         float textX = pos.X + 12f;
         if (image is not null)
         {
+            // Center-square crop so non-square thumbnails aren't stretched (the circle mask
+            // otherwise reads as a horizontally-squished ellipse).
+            float sw = image.SizeInPixels.Width, sh = image.SizeInPixels.Height;
+            float srcSide = MathF.Min(sw, sh);
             session.DrawImage(image,
                 new Windows.Foundation.Rect(pos.X + 11, pos.Y + 11, 64, 64),
-                new Windows.Foundation.Rect(0, 0, image.SizeInPixels.Width, image.SizeInPixels.Height), a);
+                new Windows.Foundation.Rect((sw - srcSide) / 2, (sh - srcSide) / 2, srcSide, srcSide), a);
             textX = pos.X + 86f;
         }
 
