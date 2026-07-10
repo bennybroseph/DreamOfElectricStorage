@@ -11,6 +11,7 @@ return args switch
 {
     ["watch"] => await RunWatchAsync(),
     ["dupes"] => await RunDupesAsync(),
+    ["clusters", .. var cargs] when cargs.Length <= 1 => await RunClustersAsync(cargs.Length == 1 ? int.Parse(cargs[0]) : 4000),
     ["index", .. var rest] when rest.Length <= 1 => await RunIndexAsync(rest.Length == 1 ? rest[0] : "benny"),
     [var volume] when volume != "dupes" => await RunEnumerateAsync(volume),
     _ => Usage(),
@@ -18,8 +19,49 @@ return args switch
 
 static int Usage()
 {
-    Console.Error.WriteLine("Usage: IndexerCli <volume> | IndexerCli index [search-term] | IndexerCli watch | IndexerCli dupes");
+    Console.Error.WriteLine("Usage: IndexerCli <volume> | IndexerCli index [search-term] | IndexerCli watch | IndexerCli dupes | IndexerCli clusters [maxNodes]");
     return 2;
+}
+
+// Measures the C5 cluster-graph build (working-set selection + relationship grouping) on
+// real data: timing, well counts per kind, and memory — the numbers future scaling tunes against.
+static async Task<int> RunClustersAsync(int maxNodes)
+{
+    MachineIndex machine;
+    try
+    {
+        Console.WriteLine("building machine index...");
+        machine = await MachineIndex.BuildAsync(new NtfsDriveIndexer());
+    }
+    catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+    {
+        Console.Error.WriteLine($"error: {ex.Message}");
+        return 1;
+    }
+
+    Console.WriteLine($"machine index: {machine.TotalCount:N0} nodes across {machine.Volumes.Count} volume(s)");
+    long beforeBytes = GC.GetTotalMemory(forceFullCollection: true);
+
+    var sw = Stopwatch.StartNew();
+    ClusterGraph graph = ClusterGraphBuilder.Build(machine.Volumes, maxNodes);
+    sw.Stop();
+
+    long afterBytes = GC.GetTotalMemory(forceFullCollection: true);
+
+    Console.WriteLine();
+    Console.WriteLine($"cluster graph: {graph.Nodes.Count:N0} working-set nodes (of {graph.TotalEligible:N0} eligible files), "
+        + $"{graph.Groups.Count:N0} wells, built in {sw.Elapsed.TotalMilliseconds:N0} ms");
+    foreach (var g in graph.Groups.GroupBy(g => g.Kind).OrderBy(g => g.Key.ToString()))
+        Console.WriteLine($"    {g.Key,-12} {g.Count(),6:N0} wells  ({g.Sum(w => w.MemberIds.Count):N0} memberships)");
+    Console.WriteLine($"graph memory: +{(afterBytes - beforeBytes) / (1024.0 * 1024.0):N1} MB over the index baseline");
+
+    // Sanity: the biggest working-set files should be real disk hogs.
+    Console.WriteLine();
+    Console.WriteLine("largest working-set files:");
+    foreach (var info in graph.Nodes.OrderByDescending(n => n.SizeBytes).Take(8))
+        Console.WriteLine($"    {info.SizeBytes / (double)(1L << 30):F2} GB  {info.Volume.GetPath(info.Frn)}");
+
+    return 0;
 }
 
 static async Task<int> RunDupesAsync()

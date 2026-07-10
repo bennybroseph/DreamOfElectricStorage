@@ -20,8 +20,7 @@ namespace DreamOfElectricStorage.App;
 /// </summary>
 public sealed class ClusterView : ISceneView
 {
-    private const int MaxWorkingSet = 4000;      // C2 demo bound; C5 does real-scale scoping
-    private const double DateBucketDays = 1.0;
+    private const int MaxWorkingSet = 4000;      // working-set cap fed to the layout/physics
 
     // Home-drive palette (mirrors the design mockup): white C:, cyan D:, violet E:.
     private static readonly (char Letter, Color Color)[] DrivePalette =
@@ -102,94 +101,30 @@ public sealed class ClusterView : ISceneView
         RedrawNeeded?.Invoke();
     }
 
+    public int TotalEligible { get; private set; }
+
     public void SetIndex(MachineIndex machine)
     {
         _hoverIndex = null;
         _dragId = null;
 
-        var meta = new List<NodeMeta>();
-        var items = new List<ClusterLayout.Item>();
-        // Group buckets keyed by string → global (sequential) ids.
-        var folder = new Dictionary<string, List<ulong>>();
-        var dup = new Dictionary<string, List<ulong>>();
-        var name = new Dictionary<string, List<ulong>>();
-        var type = new Dictionary<string, List<ulong>>();
-        var date = new Dictionary<string, List<ulong>>();
+        // Core builds the bounded working set (top-N by size) + relationship groups.
+        ClusterGraph graph = ClusterGraphBuilder.Build(machine.Volumes, MaxWorkingSet);
+        TotalEligible = graph.TotalEligible;
 
-        foreach (VolumeIndex volume in machine.Volumes)
-        {
-            Color rim = DriveColor(volume.Volume);
-            foreach (FileNode file in EnumerateFiles(volume))
-            {
-                if (meta.Count >= MaxWorkingSet)
-                    break;
-                ulong gid = (ulong)meta.Count;
-                FileTypeCategory cat = FileTypeClassifier.Classify(file.Name);
-                string dupKey = $"{file.Name.ToLowerInvariant()}|{file.SizeBytes}";
-                string nameKey = NameStem.Normalize(file.Name);
+        _meta = graph.Nodes.Select(info => new NodeMeta(
+            info.Name, info.SizeBytes, ClusterLayout.NodeRadius(info.SizeBytes),
+            TypeColor.GetValueOrDefault(info.Category, TypeColor[FileTypeCategory.Other]),
+            DriveColor(info.Drive), info.Volume, info.Frn,
+            $"{info.Name.ToLowerInvariant()}|{info.SizeBytes}", NameStem.Normalize(info.Name)))
+            .ToArray();
 
-                items.Add(new ClusterLayout.Item(gid, file.SizeBytes));
-                meta.Add(new NodeMeta(file.Name, file.SizeBytes, ClusterLayout.NodeRadius(file.SizeBytes),
-                    TypeColor.GetValueOrDefault(cat, TypeColor[FileTypeCategory.Other]), rim,
-                    volume, file.Id, dupKey, nameKey));
-
-                Add(folder, $"{volume.Volume}|{file.ParentId}", gid);
-                Add(dup, dupKey, gid);
-                if (nameKey.Length > 0)
-                    Add(name, nameKey, gid);
-                Add(type, $"{cat}", gid);
-                if (file.LastWriteFileTime > 0)
-                    Add(date, $"{file.LastWriteFileTime / (long)(DateBucketDays * 864_000_000_000L)}", gid);
-            }
-        }
-
-        _meta = meta.ToArray();
-        var groups = new List<ClusterLayout.Group>();
-        AddGroups(groups, WellKind.Folder, folder);
-        AddGroups(groups, WellKind.Duplicate, dup);
-        AddGroups(groups, WellKind.SimilarName, name);
-        AddGroups(groups, WellKind.Type, type);
-        AddGroups(groups, WellKind.Date, date);
-
-        _layout = new ClusterLayout(items, groups, _weights);
+        _layout = new ClusterLayout(graph.Items, graph.Groups, _weights);
         _layout.Solve(150); // settle before first paint so the view opens calm, not chaotic
         _positions = _layout.Positions();
         _clustersDirty = true;
         _pendingInitialFit = true;
         _clock.RequestFrames();
-    }
-
-    private static void Add(Dictionary<string, List<ulong>> map, string key, ulong gid)
-    {
-        if (!map.TryGetValue(key, out var list))
-            map[key] = list = [];
-        list.Add(gid);
-    }
-
-    private static void AddGroups(List<ClusterLayout.Group> groups, WellKind kind, Dictionary<string, List<ulong>> map)
-    {
-        foreach (var list in map.Values)
-            if (list.Count > 1) // a well needs at least two members
-                groups.Add(new ClusterLayout.Group(kind, list));
-    }
-
-    /// <summary>DFS every file (leaf) under a volume, biggest-first within each folder.</summary>
-    private static IEnumerable<FileNode> EnumerateFiles(VolumeIndex volume)
-    {
-        var stack = new Stack<FileNode>(volume.RootEntries);
-        while (stack.Count > 0)
-        {
-            FileNode node = stack.Pop();
-            if (node.IsDirectory)
-            {
-                foreach (FileNode child in volume.GetChildren(node.Id))
-                    stack.Push(child);
-            }
-            else
-            {
-                yield return node;
-            }
-        }
     }
 
     private static Color DriveColor(string volume)
