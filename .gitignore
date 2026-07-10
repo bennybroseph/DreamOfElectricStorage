@@ -1,6 +1,8 @@
 # Agent files (local only)
 CLAUDE.md
 .claude/settings.local.json
+# graphify writes machine-specific absolute paths into settings.json
+.claude/settings.json
 .mcp.json
 
 # .NET
@@ -27,6 +29,8 @@ BundleArtifacts/
 # Graphify (code knowledge graph, local tooling)
 graph.json
 graphify-out/
+.graphifyignore
+.claudeignore
 
 # OS
 Thumbs.db
