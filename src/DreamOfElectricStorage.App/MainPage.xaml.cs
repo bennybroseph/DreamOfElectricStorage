@@ -99,6 +99,13 @@ public sealed partial class MainPage : Page
         _settingsUiReady = false;
         ThemeChoice.SelectedIndex = ThemeIndex(_settings.Theme);
         ViewChoice.SelectedIndex = ClustersMode ? 0 : 1;
+        ForcesPanel.Visibility = ClustersMode ? Visibility.Visible : Visibility.Collapsed;
+        ForceSizeSlider.Value = _settings.ForceSizeGravity * 100;
+        ForceDupSlider.Value = _settings.ForceDuplicate * 100;
+        ForceNameSlider.Value = _settings.ForceSimilarName * 100;
+        ForceFolderSlider.Value = _settings.ForceFolder * 100;
+        ForceDateSlider.Value = _settings.ForceDate * 100;
+        ForceTypeSlider.Value = _settings.ForceType * 100;
         _settingsUiReady = true;
     }
 
@@ -124,6 +131,7 @@ public sealed partial class MainPage : Page
             ? Visibility.Visible : Visibility.Collapsed;
         _graph.ReduceMotion = _clusters.ReduceMotion = _settings.ReduceMotion;
         _graph.ShowSystemFolders = _settings.ShowSystemFolders;
+        _clusters.Weights = _settings.ToForceWeights();
         ApplyViewMode();
         GraphCanvas.Invalidate();
     }
@@ -168,6 +176,31 @@ public sealed partial class MainPage : Page
         RefreshLegend();
         LegendPanel.Visibility = !ClustersMode && _settings.ShowLegend && _graph.ColorMode != GraphColorMode.None
             ? Visibility.Visible : Visibility.Collapsed;
+        GraphCanvas.Invalidate();
+    }
+
+    private void OnForceChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (!_settingsUiReady || sender is not Slider { Tag: string name })
+            return;
+        SetForce(name, e.NewValue / 100.0);
+    }
+
+    /// <summary>Update one cluster force weight (value 0..1) → live re-settle + persist.</summary>
+    private void SetForce(string name, double value)
+    {
+        switch (name)
+        {
+            case "size": _settings.ForceSizeGravity = value; break;
+            case "dupes": _settings.ForceDuplicate = value; break;
+            case "names": _settings.ForceSimilarName = value; break;
+            case "folder": _settings.ForceFolder = value; break;
+            case "date": _settings.ForceDate = value; break;
+            case "type": _settings.ForceType = value; break;
+            default: return;
+        }
+        _settings.Save();
+        _clusters.Weights = _settings.ToForceWeights(); // setter re-steps the physics
         GraphCanvas.Invalidate();
     }
 
@@ -1184,6 +1217,9 @@ public sealed partial class MainPage : Page
                     case "motion": MotionToggle.IsOn = parts[2] == "on"; break;
                     case "system": SystemFoldersToggle.IsOn = parts[2] == "on"; break;
                     case "view": SwitchView(parts[2].ToLowerInvariant() == "cells" ? "Cells" : "Clusters"); break;
+                    case "force": // settings force <size|dupes|names|folder|date|type> <0-100>
+                        SetForce(parts[2].ToLowerInvariant(), Arg(3) / 100.0);
+                        return $"ok force {parts[2]}={Arg(3)} weights={_settings.ToForceWeights()}";
                     default: return "err unknown setting";
                 }
                 return $"ok view={_settings.ViewMode} theme={_settings.Theme} legend={_settings.ShowLegend} motion={_settings.ReduceMotion} system={_settings.ShowSystemFolders}";

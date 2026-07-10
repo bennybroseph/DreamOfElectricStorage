@@ -63,6 +63,17 @@
                                     <x:String>Light</x:String>
                                     <x:String>Dark</x:String>
                                 </RadioButtons>
+                                <StackPanel x:Name="ForcesPanel" Spacing="0">
+                                    <TextBlock Text="Cluster forces" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,0,0,2" />
+                                    <TextBlock Text="How hard each relationship pulls its wells together."
+                                               Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" TextWrapping="Wrap" Margin="0,0,0,4" />
+                                    <Slider x:Name="ForceSizeSlider" Header="Size gravity" Tag="size" Minimum="0" Maximum="100" StepFrequency="5" ValueChanged="OnForceChanged" />
+                                    <Slider x:Name="ForceDupSlider" Header="Duplicates" Tag="dupes" Minimum="0" Maximum="100" StepFrequency="5" ValueChanged="OnForceChanged" />
+                                    <Slider x:Name="ForceNameSlider" Header="Similar names" Tag="names" Minimum="0" Maximum="100" StepFrequency="5" ValueChanged="OnForceChanged" />
+                                    <Slider x:Name="ForceFolderSlider" Header="Folder cohesion" Tag="folder" Minimum="0" Maximum="100" StepFrequency="5" ValueChanged="OnForceChanged" />
+                                    <Slider x:Name="ForceDateSlider" Header="Same date" Tag="date" Minimum="0" Maximum="100" StepFrequency="5" ValueChanged="OnForceChanged" />
+                                    <Slider x:Name="ForceTypeSlider" Header="Same type" Tag="type" Minimum="0" Maximum="100" StepFrequency="5" ValueChanged="OnForceChanged" />
+                                </StackPanel>
                                 <ToggleSwitch x:Name="LegendToggle" Header="Show legend" Toggled="OnLegendToggled" />
                                 <ToggleSwitch x:Name="MotionToggle" Header="Reduce motion" Toggled="OnMotionToggled" />
                                 <ToggleSwitch x:Name="SystemFoldersToggle" Header="Show system folders" Toggled="OnSystemFoldersToggled" />

@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Text.Json;
+using DreamOfElectricStorage.Core;
 
 namespace DreamOfElectricStorage.App;
 
@@ -19,6 +20,18 @@ public sealed class SettingsStore
 
     /// <summary>"Clusters" (relationship-well map, default) or "Cells" (circle-pack hierarchy).</summary>
     public string ViewMode { get; set; } = "Clusters";
+
+    // Clusters-view per-force strengths (0..1). Defaults mirror ForceWeights: type low so
+    // the map doesn't blob out of the box; relationships pull hardest.
+    public double ForceSizeGravity { get; set; } = 0.80;
+    public double ForceDuplicate { get; set; } = 0.90;
+    public double ForceSimilarName { get; set; } = 0.75;
+    public double ForceFolder { get; set; } = 0.50;
+    public double ForceDate { get; set; } = 0.30;
+    public double ForceType { get; set; } = 0.20;
+
+    public ForceWeights ToForceWeights() => new(
+        ForceSizeGravity, ForceDuplicate, ForceSimilarName, ForceFolder, ForceDate, ForceType);
 
     public bool ShowLegend { get; set; } = true;
 
