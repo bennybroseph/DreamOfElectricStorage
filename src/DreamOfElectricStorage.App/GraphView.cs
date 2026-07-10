@@ -83,8 +83,9 @@ public sealed class GraphView
         VerticalAlignment = CanvasVerticalAlignment.Top,
     };
 
-    // Category is cached at build time — Classify() is string work, too hot for the draw loop.
-    private readonly record struct GraphNode(FileNode File, VolumeIndex Volume, Vector2 Position, float Radius, string Label, FileTypeCategory Category);
+    // Category/Path are cached at build time — string work is too hot for the draw loop.
+    // Path is null past MaxLevelPaths (tail nodes are too small for icons anyway).
+    private readonly record struct GraphNode(FileNode File, VolumeIndex Volume, Vector2 Position, float Radius, string Label, FileTypeCategory Category, string? Path);
 
     /// <summary>A node the pointer landed on. IsVolumeNode = machine-level drive circle (no real FRN).</summary>
     public readonly record struct NodeHit(VolumeIndex Volume, FileNode File, bool IsVolumeNode);
@@ -99,7 +100,7 @@ public sealed class GraphView
 
     // Child-pack previews: lazily computed per dir, budgeted per frame so a wall of
     // dirs crossing the reveal threshold can't hitch a frame.
-    private sealed record ChildPack(FileNode[] Files, Vector2[] Positions, float[] Radii, FileTypeCategory[] Categories, float PackRadius);
+    private sealed record ChildPack(FileNode[] Files, Vector2[] Positions, float[] Radii, FileTypeCategory[] Categories, string?[] Paths, float PackRadius);
     private readonly Dictionary<(VolumeIndex Volume, ulong Frn), ChildPack> _previewCache = [];
     private int _previewBudget;
 
@@ -143,8 +144,25 @@ public sealed class GraphView
     private const float MinDrawScreenR = 0.35f;              // sub-pixel cutoff (radii descend → break)
     private const int MaxCirclesPerFrame = 24000;            // biggest-first budget — only sub-px dust drops
     private CanvasRenderTarget? _circleSprite;
+    private CanvasRenderTarget? _squircleSprite;             // shape-by-kind: files render as rounded squares
     private readonly List<(Vector2 Pos, float Radius, Color Color, float Stroke)> _ringQueue = [];
     private readonly List<(int Index, float Radius, bool Force)> _labelQueue = [];
+
+    // Node identity (V5): shell icons/thumbnails + child-count badges.
+    private const float IconMinScreenR = 20f;                // node must be this big for an icon/thumb
+    private const float BadgeMinScreenR = 24f;               // dir count badge window: [this, RevealStart)
+    private const int MaxLevelPaths = 2000;                  // paths resolved at rebuild (biggest-first; icons only matter big)
+    private static readonly Color BadgeColor = Color.FromArgb(215, 235, 240, 248);
+    private static readonly CanvasTextFormat BadgeFormat = new()
+    {
+        FontSize = 12,
+        HorizontalAlignment = CanvasHorizontalAlignment.Center,
+        VerticalAlignment = CanvasVerticalAlignment.Center,
+    };
+    private readonly List<(Vector2 WorldPos, string Text)> _badgeQueue = [];
+
+    /// <summary>Shell image source. MainPage marshals its Ready event to a canvas invalidate.</summary>
+    public ShellImageLoader Images { get; } = new();
 #if DEBUG
     private long _frameCounter;
 #endif
@@ -583,9 +601,12 @@ public sealed class GraphView
         for (int i = 0; i < entries.Count; i++)
         {
             var (file, volume, radius, label) = entries[i];
+            string? path = i >= MaxLevelPaths ? null
+                : _currentVolume is null ? volume.Volume + @"\"
+                : volume.GetPath(file.Id);
             _nodes.Add(new GraphNode(file, volume,
                 new Vector2((float)circles[i].X, (float)circles[i].Y), radius, label,
-                file.IsDirectory ? FileTypeCategory.Other : FileTypeClassifier.Classify(file.Name)));
+                file.IsDirectory ? FileTypeCategory.Other : FileTypeClassifier.Classify(file.Name), path));
         }
 
         if (resetCamera)
@@ -637,16 +658,18 @@ public sealed class GraphView
         var positions = new Vector2[files.Length];
         var radii = new float[files.Length];
         var categories = new FileTypeCategory[files.Length];
+        var paths = new string?[files.Length];
         for (int i = 0; i < files.Length; i++)
         {
             positions[i] = new Vector2((float)circles[i].X, (float)circles[i].Y);
             radii[i] = (float)circles[i].R;
             categories[i] = files[i].IsDirectory ? FileTypeCategory.Other : FileTypeClassifier.Classify(files[i].Name);
+            paths[i] = volume.GetPath(files[i].Id);
         }
 
         if (_previewCache.Count >= PreviewCacheCap)
             _previewCache.Clear();
-        var pack = new ChildPack(files, positions, radii, categories, packRadius);
+        var pack = new ChildPack(files, positions, radii, categories, paths, packRadius);
         _previewCache[(volume, parentFrn)] = pack;
         return pack;
     }
@@ -779,7 +802,9 @@ public sealed class GraphView
         float zoom = Camera.Zoom;
         long nowFileTime = DateTime.UtcNow.ToFileTimeUtc();
         _labelRects.Clear();
+        _badgeQueue.Clear();
         _previewBudget = 2; // at most 2 fresh child packs per frame — no hitches
+        Images.DrainReady(canvas.Device, 6); // finished shell images → device bitmaps, budgeted
 
         // Level fade: fading out toward a pending swap, otherwise fully opaque (entrance scales instead).
         float levelAlpha = _pendingLevelSwap is not null ? 1f - _fadeOut.Value : 1f;
@@ -810,7 +835,10 @@ public sealed class GraphView
         // Circles go through a sprite batch (rendered when the batch is disposed);
         // rings and labels are queued and drawn after so they sit on top.
         if (_circleSprite is null || _circleSprite.Device != canvas.Device)
-            _circleSprite = CreateCircleSprite(canvas);
+        {
+            _circleSprite = CreateShapeSprite(canvas, squircle: false);
+            _squircleSprite = CreateShapeSprite(canvas, squircle: true);
+        }
         _ringQueue.Clear();
         _labelQueue.Clear();
 
@@ -844,7 +872,8 @@ public sealed class GraphView
                 float reveal = node.File.IsDirectory
                     ? Math.Clamp((radius * zoom - RevealStartScreenR) / (RevealFullScreenR - RevealStartScreenR), 0f, 1f)
                     : 0f;
-                DrawNodeCircle(sprites, session, node.Position, radius, WithAlpha(nodeColor, levelAlpha * (1f - 0.72f * reveal)), zoom);
+                bool circleShape = node.File.IsDirectory || node.Category is FileTypeCategory.Image or FileTypeCategory.Video;
+                DrawNodeShape(sprites, session, node.Position, radius, WithAlpha(nodeColor, levelAlpha * (1f - 0.72f * reveal)), zoom, circleShape);
                 if (reveal > 0f)
                 {
                     _ringQueue.Add((node.Position, radius, WithAlpha(nodeColor, levelAlpha * (0.35f + 0.4f * reveal)), 2f / zoom));
@@ -852,6 +881,13 @@ public sealed class GraphView
                         _currentVolume is null ? VolumeIndex.SyntheticRootId : node.File.Id,
                         node.Position, radius, levelAlpha * reveal, zoom, nowFileTime, depth: 0);
                 }
+                else if (node.File.IsDirectory)
+                {
+                    QueueDirBadge(node.Volume, node.File, node.Position, radius * zoom, _currentVolume is null);
+                }
+
+                if (!node.File.IsDirectory)
+                    DrawIdentity(sprites, node.Position, radius, zoom, node.Path, node.Category);
 
                 if (_highlightedFrn == node.File.Id && _currentVolume is not null)
                     _ringQueue.Add((node.Position, (radius + 6) * pulse, WithAlpha(HighlightColor, levelAlpha), 3f / zoom));
@@ -883,6 +919,15 @@ public sealed class GraphView
         foreach (var (index, radius, force) in _labelQueue)
             TryDrawLabel(session, index, radius, levelAlpha, force, zoom);
 
+        // Child-count badges render at fixed screen size (world text would balloon).
+        if (_badgeQueue.Count > 0)
+        {
+            session.Transform = Matrix3x2.Identity;
+            foreach (var (worldPos, text) in _badgeQueue)
+                session.DrawText(text, Camera.WorldToScreen(worldPos), BadgeColor, BadgeFormat);
+            session.Transform = Camera.Transform;
+        }
+
 #if DEBUG
         // Diagnostic overlay (debug builds only): live camera/clock numbers for the harness.
         session.Transform = Matrix3x2.Identity;
@@ -907,31 +952,100 @@ public sealed class GraphView
             _drawSamples.Add(_drawTimer.Elapsed.TotalMilliseconds);
     }
 
-    /// <summary>One tinted circle: sprite instance when small, crisp vector fill when big.</summary>
-    private void DrawNodeCircle(CanvasSpriteBatch? sprites, CanvasDrawingSession session,
-        Vector2 pos, float radius, Color color, float zoom)
+    /// <summary>
+    /// One tinted node shape: sprite instance when small, crisp vector when big.
+    /// Shape-by-kind: containers and media (thumbnail-ready) are circles, other files
+    /// are rounded squares — leaves read differently from containers at a glance.
+    /// </summary>
+    private void DrawNodeShape(CanvasSpriteBatch? sprites, CanvasDrawingSession session,
+        Vector2 pos, float radius, Color color, float zoom, bool circle)
     {
         _drawnCircles++;
-        if (sprites is null || _circleSprite is null || radius * zoom >= VectorCircleScreenR)
+        CanvasRenderTarget? sprite = circle ? _circleSprite : _squircleSprite;
+        if (sprites is null || sprite is null || radius * zoom >= VectorCircleScreenR)
         {
-            session.FillCircle(pos, radius, color);
+            if (circle)
+                session.FillCircle(pos, radius, color);
+            else
+                session.FillRoundedRectangle(pos.X - 0.85f * radius, pos.Y - 0.85f * radius,
+                    1.7f * radius, 1.7f * radius, 0.5f * radius, 0.5f * radius, color);
             return;
         }
 
-        // Dest rect sized so the texture's circle (not its padding) lands at `radius`.
+        // Dest rect sized so the texture's shape (not its padding) lands at `radius`.
         float extent = radius * (SpriteSourceSize / 2f) / SpriteSourceRadius;
-        sprites.Draw(_circleSprite,
+        sprites.Draw(sprite,
             new Windows.Foundation.Rect(pos.X - extent, pos.Y - extent, extent * 2, extent * 2),
             new Vector4(color.R, color.G, color.B, color.A) / 255f);
     }
 
-    private static CanvasRenderTarget CreateCircleSprite(CanvasControl canvas)
+    private static CanvasRenderTarget CreateShapeSprite(CanvasControl canvas, bool squircle)
     {
         var target = new CanvasRenderTarget(canvas.Device, SpriteSourceSize, SpriteSourceSize, 96);
         using CanvasDrawingSession session = target.CreateDrawingSession();
         session.Clear(Color.FromArgb(0, 0, 0, 0));
-        session.FillCircle(SpriteSourceSize / 2f, SpriteSourceSize / 2f, SpriteSourceRadius, Color.FromArgb(255, 255, 255, 255));
+        Color white = Color.FromArgb(255, 255, 255, 255);
+        float c = SpriteSourceSize / 2f;
+        if (squircle)
+        {
+            float half = SpriteSourceRadius * 0.85f;
+            session.FillRoundedRectangle(c - half, c - half, half * 2, half * 2,
+                half * 0.58f, half * 0.58f, white);
+        }
+        else
+        {
+            session.FillCircle(c, c, SpriteSourceRadius, white);
+        }
         return target;
+    }
+
+    /// <summary>Shell icon / circle-cropped thumbnail on top of the base shape (files only).</summary>
+    private void DrawIdentity(CanvasSpriteBatch? sprites, Vector2 pos, float radius, float zoom,
+        string? path, FileTypeCategory category)
+    {
+        if (sprites is null || path is null || radius * zoom < IconMinScreenR)
+            return;
+
+        if (category is FileTypeCategory.Image or FileTypeCategory.Video)
+        {
+            string thumbKey = "T|" + path;
+            CanvasBitmap? thumb = Images.TryGet(thumbKey);
+            if (thumb is not null)
+            {
+                float scale = radius * 2f / Math.Min(thumb.SizeInPixels.Width, thumb.SizeInPixels.Height);
+                float w = thumb.SizeInPixels.Width * scale, h = thumb.SizeInPixels.Height * scale;
+                sprites.Draw(thumb, new Windows.Foundation.Rect(pos.X - w / 2, pos.Y - h / 2, w, h), Vector4.One);
+                return;
+            }
+            if (!Images.IsResolved(thumbKey))
+            {
+                Images.Request(thumbKey, path, thumbnail: true);
+                return;
+            }
+            // thumbnail failed → fall through to the generic icon
+        }
+
+        string ext = System.IO.Path.GetExtension(path);
+        string key = ext is ".exe" or ".lnk" or ".ico" || ext.Length == 0
+            ? "P|" + path                       // own-icon files
+            : "E|" + ext.ToLowerInvariant();    // one icon per extension
+        CanvasBitmap? icon = Images.TryGet(key);
+        if (icon is null)
+        {
+            Images.Request(key, path, thumbnail: false);
+            return;
+        }
+        float side = radius * 1.4f;
+        sprites.Draw(icon, new Windows.Foundation.Rect(pos.X - side / 2, pos.Y - side / 2, side, side), Vector4.One);
+    }
+
+    private void QueueDirBadge(VolumeIndex volume, FileNode file, Vector2 pos, float screenR, bool isVolumeLevel)
+    {
+        if (screenR < BadgeMinScreenR || screenR >= RevealStartScreenR)
+            return;
+        int count = isVolumeLevel ? volume.RootEntries.Count : volume.GetChildren(file.Id).Count;
+        if (count > 0)
+            _badgeQueue.Add((pos, count.ToString("N0")));
     }
 
     /// <summary>
@@ -963,16 +1077,25 @@ public sealed class GraphView
                 continue;
 
             FileNode file = pack.Files[i];
-            Color color = ResolveColor(file, pack.Categories[i], nowFileTime);
+            FileTypeCategory category = pack.Categories[i];
+            Color color = ResolveColor(file, category, nowFileTime);
             float childReveal = file.IsDirectory
                 ? Math.Clamp((screenR - RevealStartScreenR) / (RevealFullScreenR - RevealStartScreenR), 0f, 1f)
                 : 0f;
-            DrawNodeCircle(sprites, session, pos, r, WithAlpha(color, alpha * (1f - 0.72f * childReveal)), zoom);
+            bool circleShape = file.IsDirectory || category is FileTypeCategory.Image or FileTypeCategory.Video;
+            DrawNodeShape(sprites, session, pos, r, WithAlpha(color, alpha * (1f - 0.72f * childReveal)), zoom, circleShape);
             if (childReveal > 0f)
             {
                 _ringQueue.Add((pos, r, WithAlpha(color, alpha * (0.35f + 0.4f * childReveal)), 2f / zoom));
                 DrawPreview(sprites, session, volume, file.Id, pos, r, alpha * childReveal, zoom, nowFileTime, depth + 1);
             }
+            else if (file.IsDirectory)
+            {
+                QueueDirBadge(volume, file, pos, screenR, isVolumeLevel: false);
+            }
+
+            if (!file.IsDirectory)
+                DrawIdentity(sprites, pos, r, zoom, pack.Paths[i], category);
         }
     }
 

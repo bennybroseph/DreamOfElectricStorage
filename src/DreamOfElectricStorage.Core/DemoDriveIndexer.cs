@@ -37,6 +37,18 @@ public sealed class DemoDriveIndexer(int stressFiles = 0) : IDriveIndexer
         Files(nodes, ref nextFile, 11, 40, i => ($"system-{i:D3}.dll", 200_000 + i * 12_345, AgeDays(400 + i)));
         Files(nodes, ref nextFile, 10, 6, i => ($"setup-{i}.log", 40_000 + i * 900, AgeDays(30 + i)));
 
+        // These names mirror files that exist on every Windows machine, so the demo's
+        // synthetic paths resolve against the REAL shell — exercises icon/thumbnail
+        // loading without elevation (fake paths fall back to plain shapes).
+        File(nodes, ref nextFile, 10, "explorer.exe", 5_400_000, AgeDays(500));
+        File(nodes, ref nextFile, 10, "notepad.exe", 360_000, AgeDays(500));
+        File(nodes, ref nextFile, 11, "kernel32.dll", 780_000, AgeDays(500));
+        File(nodes, ref nextFile, 11, "user32.dll", 1_700_000, AgeDays(500));
+        Dir(nodes, 12, 10, "Web");
+        Dir(nodes, 13, 12, "Wallpaper");
+        Dir(nodes, 14, 13, "Windows");
+        File(nodes, ref nextFile, 14, "img0.jpg", 4_100_000, AgeDays(500));
+
         Dir(nodes, 20, 5, "Program Files");
         Dir(nodes, 21, 20, "Sample Game");
         Files(nodes, ref nextFile, 21, 4, i => ($"data-{i}.pak", 2_000_000_000L + i * 350_000_000L, AgeDays(200)));

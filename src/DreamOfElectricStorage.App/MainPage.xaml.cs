@@ -40,6 +40,7 @@ public sealed partial class MainPage : Page
         InitializeComponent();
         _graph.LevelChanged += OnGraphLevelChanged;
         _graph.RedrawNeeded += () => GraphCanvas.Invalidate(); // animation clock → repaint
+        _graph.Images.Ready += () => DispatcherQueue.TryEnqueue(() => GraphCanvas.Invalidate()); // icons arrive off-thread
         Loaded += OnPageLoaded;
         RefreshLegend();
 
