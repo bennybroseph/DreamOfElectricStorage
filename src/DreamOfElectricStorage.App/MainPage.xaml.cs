@@ -1202,6 +1202,13 @@ public sealed partial class MainPage : Page
                     $"{n.Name} | {n.ScreenPosition.X:F0},{n.ScreenPosition.Y:F0} | r={n.ScreenRadius:F0} | {(n.IsDirectory ? "dir" : "file")} | {n.Frn}"));
             }
 
+            case "clusters": // LOD state of the Clusters view: count | screenRadius | state
+            {
+                var summaries = _clusters.ClusterSummaries();
+                return $"{summaries.Count} clusters\n" + string.Join('\n',
+                    summaries.OrderByDescending(s => s.Count).Select(s => $"{s.Count} | r={s.ScreenRadius:F0} | {s.State}"));
+            }
+
             case "perf":
                 return _graph.PerfReport();
 

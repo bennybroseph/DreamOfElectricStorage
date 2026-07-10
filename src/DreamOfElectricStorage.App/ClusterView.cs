@@ -35,8 +35,12 @@ public sealed class ClusterView : ISceneView
         GraphView.TypePalette.ToDictionary(t => t.Category, t => t.Color);
 
     private readonly record struct NodeMeta(
-        string Name, float Radius, Color Fill, Color Rim, VolumeIndex Volume, ulong Frn,
+        string Name, long Bytes, float Radius, Color Fill, Color Rim, VolumeIndex Volume, ulong Frn,
         string? DupKey, string? NameKey);
+
+    /// <summary>A visual cluster of settled nodes — the LOD summary unit.</summary>
+    private readonly record struct SummaryCluster(
+        int[] Members, Vector2 Center, float Radius, long Bytes, Color Fill);
 
     private readonly AnimationClock _clock = new();
     private ClusterLayout? _layout;
@@ -47,6 +51,14 @@ public sealed class ClusterView : ISceneView
     private bool _pendingInitialFit;
     private double _lastMove;
     private int? _hoverIndex;
+
+    // LOD: spatial clusters (recomputed from settled positions) summarize when far,
+    // expand to files when near. ExpandStart/Full are the cluster screen-radius crossfade.
+    private const float ExpandStart = 70f;   // below this screen radius → fully summarized
+    private const float ExpandFull = 150f;   // above → fully expanded to files
+    private const double LinkFactor = 1.35;  // neighbors within (r_i+r_j)·this join a cluster
+    private List<SummaryCluster>? _clusterCache;
+    private bool _clustersDirty = true;
 
     private ulong? _dragId;
     private Vector2 _dragWorld;
@@ -65,7 +77,7 @@ public sealed class ClusterView : ISceneView
     public ForceWeights Weights
     {
         get => _weights;
-        set { _weights = value; if (_layout is not null) { _layout.Weights = value; _clock.RequestFrames(); } }
+        set { _weights = value; _clustersDirty = true; if (_layout is not null) { _layout.Weights = value; _clock.RequestFrames(); } }
     }
 
     public event Action? RedrawNeeded;
@@ -84,6 +96,7 @@ public sealed class ClusterView : ISceneView
                 _layout.SetPosition(id, _dragWorld);
             _lastMove = _layout.Step(dt);
             _positions = _layout.Positions();
+            _clustersDirty = true; // positions moved → LOD clusters stale
         }
         Camera.Advance(dt);
         RedrawNeeded?.Invoke();
@@ -116,7 +129,7 @@ public sealed class ClusterView : ISceneView
                 string nameKey = NameStem.Normalize(file.Name);
 
                 items.Add(new ClusterLayout.Item(gid, file.SizeBytes));
-                meta.Add(new NodeMeta(file.Name, ClusterLayout.NodeRadius(file.SizeBytes),
+                meta.Add(new NodeMeta(file.Name, file.SizeBytes, ClusterLayout.NodeRadius(file.SizeBytes),
                     TypeColor.GetValueOrDefault(cat, TypeColor[FileTypeCategory.Other]), rim,
                     volume, file.Id, dupKey, nameKey));
 
@@ -141,6 +154,7 @@ public sealed class ClusterView : ISceneView
         _layout = new ClusterLayout(items, groups, _weights);
         _layout.Solve(150); // settle before first paint so the view opens calm, not chaotic
         _positions = _layout.Positions();
+        _clustersDirty = true;
         _pendingInitialFit = true;
         _clock.RequestFrames();
     }
@@ -224,26 +238,145 @@ public sealed class ClusterView : ISceneView
             }
         }
 
-        for (int i = 0; i < _meta.Length; i++)
+        // LOD: each spatial cluster crossfades between a summary bubble (far) and its files
+        // (near) by its on-screen radius. Singletons always draw as a file.
+        foreach (SummaryCluster c in GetClusters())
         {
-            NodeMeta m = _meta[i];
-            Vector2 p = _positions[i];
-            float r = m.Radius;
-            bool hovered = _hoverIndex == i;
-            if (hovered)
-                r *= 1.18f;
+            float screenR = c.Radius * zoom;
+            float summaryAlpha = c.Members.Length <= 1 ? 0f
+                : Math.Clamp((ExpandFull - screenR) / (ExpandFull - ExpandStart), 0f, 1f);
 
-            session.FillCircle(p, r, m.Fill);
-            // Rim = home drive. Thin in world units so it stays a hairline at any zoom.
-            session.DrawCircle(p, r, m.Rim, MathF.Max(1.5f, r * 0.14f));
+            if (summaryAlpha < 0.999f)
+                foreach (int i in c.Members)
+                    DrawFile(session, i, zoom, 1f - summaryAlpha, labelColor);
 
-            if (r * zoom > 12f)
-            {
-                using var format = new CanvasTextFormat { FontSize = MathF.Min(13f, r) / zoom, WordWrapping = CanvasWordWrapping.NoWrap };
-                session.DrawText(m.Name, p + new Vector2(0, r + 3f / zoom),
-                    WithAlpha(labelColor, hovered ? 1f : 0.75f), format);
-            }
+            if (summaryAlpha > 0.001f)
+                DrawSummary(session, c, zoom, summaryAlpha, labelColor);
         }
+    }
+
+    private void DrawFile(CanvasDrawingSession session, int i, float zoom, float alpha, Color labelColor)
+    {
+        NodeMeta m = _meta[i];
+        Vector2 p = _positions[i];
+        float r = m.Radius;
+        bool hovered = _hoverIndex == i;
+        if (hovered)
+            r *= 1.18f;
+
+        session.FillCircle(p, r, WithAlpha(m.Fill, alpha));
+        // Rim = home drive. Thin in world units so it stays a hairline at any zoom.
+        session.DrawCircle(p, r, WithAlpha(m.Rim, alpha), MathF.Max(1.5f, r * 0.14f));
+
+        if (alpha > 0.6f && r * zoom > 12f)
+        {
+            using var format = new CanvasTextFormat { FontSize = MathF.Min(13f, r) / zoom, WordWrapping = CanvasWordWrapping.NoWrap };
+            session.DrawText(m.Name, p + new Vector2(0, r + 3f / zoom),
+                WithAlpha(labelColor, (hovered ? 1f : 0.75f) * alpha), format);
+        }
+    }
+
+    private void DrawSummary(CanvasDrawingSession session, SummaryCluster c, float zoom, float alpha, Color labelColor)
+    {
+        session.FillCircle(c.Center, c.Radius, WithAlpha(c.Fill, alpha * 0.9f));
+        session.DrawCircle(c.Center, c.Radius, WithAlpha(labelColor, alpha * 0.4f), 2f / zoom);
+
+        string label = $"{c.Members.Length} items\n{GraphView.FormatSize(c.Bytes)}";
+        float fontSize = MathF.Max(9f, MathF.Min(c.Radius * 0.28f, 22f)) / zoom;
+        using var format = new CanvasTextFormat
+        {
+            FontSize = fontSize,
+            HorizontalAlignment = CanvasHorizontalAlignment.Center,
+            VerticalAlignment = CanvasVerticalAlignment.Center,
+            WordWrapping = CanvasWordWrapping.NoWrap,
+        };
+        var box = new Windows.Foundation.Rect(c.Center.X - c.Radius, c.Center.Y - c.Radius, c.Radius * 2, c.Radius * 2);
+        session.DrawText(label, box, WithAlpha(labelColor, alpha), format);
+    }
+
+    private List<SummaryCluster> GetClusters()
+    {
+        if (!_clustersDirty && _clusterCache is not null)
+            return _clusterCache;
+        _clusterCache = ComputeClusters();
+        _clustersDirty = false;
+        return _clusterCache;
+    }
+
+    /// <summary>
+    /// Single-linkage spatial clustering of settled positions (union-find): nodes whose
+    /// centers are within (r_i+r_j)·LinkFactor join — within a well they touch, between
+    /// wells they don't. O(n²) — fine for the C2/C4 demo working set; C6 swaps to a grid.
+    /// </summary>
+    private List<SummaryCluster> ComputeClusters()
+    {
+        int n = _meta.Length;
+        var parent = new int[n];
+        for (int i = 0; i < n; i++)
+            parent[i] = i;
+        int Find(int a) { while (parent[a] != a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; }
+
+        for (int i = 0; i < n; i++)
+            for (int j = i + 1; j < n; j++)
+            {
+                double link = (_meta[i].Radius + _meta[j].Radius) * LinkFactor;
+                if ((_positions[i] - _positions[j]).LengthSquared() <= link * link)
+                    parent[Find(i)] = Find(j);
+            }
+
+        var byRoot = new Dictionary<int, List<int>>();
+        for (int i = 0; i < n; i++)
+        {
+            int root = Find(i);
+            if (!byRoot.TryGetValue(root, out var list))
+                byRoot[root] = list = [];
+            list.Add(i);
+        }
+
+        var clusters = new List<SummaryCluster>(byRoot.Count);
+        foreach (var members in byRoot.Values)
+        {
+            Vector2 center = Vector2.Zero;
+            long bytes = 0;
+            var typeCount = new Dictionary<uint, int>();
+            foreach (int i in members)
+            {
+                center += _positions[i];
+                bytes += _meta[i].Bytes;
+                uint key = ColorKey(_meta[i].Fill);
+                typeCount[key] = typeCount.GetValueOrDefault(key) + 1;
+            }
+            center /= members.Count;
+            float reach = 0f;
+            foreach (int i in members)
+                reach = MathF.Max(reach, (_positions[i] - center).Length() + _meta[i].Radius);
+            // Dominant type color (by count) tints the summary bubble.
+            Color fill = _meta[members[0]].Fill;
+            int best = -1;
+            foreach (int i in members)
+            {
+                int cnt = typeCount[ColorKey(_meta[i].Fill)];
+                if (cnt > best) { best = cnt; fill = _meta[i].Fill; }
+            }
+            clusters.Add(new SummaryCluster(members.ToArray(), center, reach, bytes, fill));
+        }
+        return clusters;
+    }
+
+    private static uint ColorKey(Color c) => (uint)(c.R << 16 | c.G << 8 | c.B);
+
+    /// <summary>Harness view of the LOD state: one line per cluster (count, screen radius, state).</summary>
+    public IReadOnlyList<(int Count, float ScreenRadius, string State)> ClusterSummaries()
+    {
+        float zoom = Camera.Zoom;
+        return GetClusters().Select(c =>
+        {
+            float sr = c.Radius * zoom;
+            string state = c.Members.Length <= 1 ? "single"
+                : sr <= ExpandStart ? "summary"
+                : sr >= ExpandFull ? "files" : "fade";
+            return (c.Members.Length, sr, state);
+        }).ToList();
     }
 
     public void Pan(Vector2 screenDelta) => Camera.PanBy(screenDelta);
