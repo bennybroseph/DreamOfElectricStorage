@@ -19,6 +19,9 @@ public sealed class GraphCamera
     public Vector2 Pan { get; private set; }
     public float Zoom { get; private set; } = 1f;
 
+    /// <summary>Where the zoom is heading — lets callers tell inward from outward motion.</summary>
+    public float ZoomTarget => _zoomTarget;
+
     /// <summary>Content-aware floor set by ZoomToFit — you can't zoom out past ~1/3 of the fitted view.</summary>
     public float MinZoom { get; private set; } = 0.02f;
 
@@ -75,14 +78,43 @@ public sealed class GraphCamera
     /// </summary>
     public void ZoomToFit(Vector2 viewport, float contentExtent, bool fly)
     {
-        float fitZoom = Math.Clamp(
-            MathF.Min(viewport.X, viewport.Y) / MathF.Max(contentExtent * 2.2f, 1f),
-            0.0001f, MaxZoom);
+        float fitZoom = FitZoom(viewport, contentExtent);
         MinZoom = fitZoom / 3f;
 
         if (fly)
             FlyTo(viewport / 2f, fitZoom);
         else
             JumpTo(viewport / 2f, fitZoom);
+    }
+
+    /// <summary>Refreshes the zoom floor for new content without moving the camera (re-root path).</summary>
+    public void UpdateMinZoom(Vector2 viewport, float contentExtent) =>
+        MinZoom = FitZoom(viewport, contentExtent) / 3f;
+
+    public static float FitZoom(Vector2 viewport, float contentExtent) => Math.Clamp(
+        MathF.Min(viewport.X, viewport.Y) / MathF.Max(contentExtent * 2.2f, 1f),
+        0.0001f, MaxZoom);
+
+    /// <summary>
+    /// Re-expresses the camera in a child coordinate frame (re-root INTO a node at
+    /// <paramref name="nodePos"/> whose contents were previewed at <paramref name="scale"/>).
+    /// Screen-invariant: every world point maps to the same pixel before and after, for
+    /// both current state and in-flight targets — a re-root mid-flight stays seamless.
+    /// </summary>
+    public void RemapDown(Vector2 nodePos, float scale)
+    {
+        Pan += nodePos * Zoom;
+        Zoom *= scale;
+        _panTarget += nodePos * _zoomTarget;
+        _zoomTarget *= scale;
+    }
+
+    /// <summary>Inverse of <see cref="RemapDown"/>: re-root OUT to the parent frame.</summary>
+    public void RemapUp(Vector2 nodePos, float scale)
+    {
+        Zoom /= scale;
+        Pan -= nodePos * Zoom;
+        _zoomTarget /= scale;
+        _panTarget -= nodePos * _zoomTarget;
     }
 }

@@ -191,6 +191,7 @@ public sealed partial class MainPage : Page
                 {
                     volume.Apply(batch);
                     RefreshChangedSizes(volume, batch);
+                    _graph.InvalidatePreviews(); // children/sizes changed — child packs are stale
                     _liveChanges += batch.Entries.Count;
                     StatusText.Text = $"live — {_liveChanges:N0} changes";
 

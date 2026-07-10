@@ -23,6 +23,17 @@ public sealed class GraphView
     private const float DirectoryRadius = 26f;
     private const float FileRadius = 12f;
     private const float PackPadding = 7f;                  // min world-unit gap between packed nodes
+
+    // Semantic zoom: directory circles past RevealStart px show their children packed
+    // inside; zooming until a dir fills the viewport re-roots the level into it.
+    private const float RevealStartScreenR = 64f;
+    private const float RevealFullScreenR = 96f;
+    private const float PreviewFit = 0.88f;                // child pack fills this fraction of the parent circle
+    private const int MaxPreviewDepth = 3;
+    private const int MaxPreviewChildren = 512;            // biggest N previewed for huge dirs
+    private const int PreviewCacheCap = 256;
+    private const float AutoDrillViewportFrac = 0.72f;     // node screen radius that triggers re-root in
+    private const float AutoUpViewportFrac = 0.33f;        // level screen radius that triggers re-root out
     private const float LabelMinScreenRadius = 9f;         // hide labels when nodes get tiny
     private const float HoverSwell = 0.18f;                // hovered node grows 18%
     private const float FadeOutSeconds = 0.18f;
@@ -84,6 +95,12 @@ public sealed class GraphView
     private readonly List<GraphNode> _nodes = [];
     private float _levelRadius;                              // enclosing circle of the packed level
     private ulong? _highlightedFrn;
+
+    // Child-pack previews: lazily computed per dir, budgeted per frame so a wall of
+    // dirs crossing the reveal threshold can't hitch a frame.
+    private sealed record ChildPack(FileNode[] Files, Vector2[] Positions, float[] Radii, float PackRadius);
+    private readonly Dictionary<(VolumeIndex Volume, ulong Frn), ChildPack> _previewCache = [];
+    private int _previewBudget;
 
     // Relationship reveal: selection is sticky, hover is transient; selection wins as anchor.
     private ulong? _hoveredFrn;
@@ -185,6 +202,8 @@ public sealed class GraphView
         if (_dragSource is not null)
             _dragGhostScreen += (_dragGhostTarget - _dragGhostScreen) * Easings.Approach(20f, dt);
 
+        EvaluateAutoNavigation();
+
         RedrawNeeded?.Invoke();
     }
 
@@ -214,8 +233,12 @@ public sealed class GraphView
         _machine = machine;
         _currentVolume = null;
         _parentTrail.Clear();
+        _previewCache.Clear();
         RebuildLevel();
     }
+
+    /// <summary>Drops cached child packs — live updates mutate children lists and sizes.</summary>
+    public void InvalidatePreviews() => _previewCache.Clear();
 
     /// <summary>Re-pulls the current level from the (mutated) index, keeping camera + no re-entrance.</summary>
     public void RefreshLevel()
@@ -508,11 +531,8 @@ public sealed class GraphView
                 ? _currentVolume.RootEntries
                 : _currentVolume.GetChildren(_parentTrail.Peek());
 
-            // Biggest first so heavy items sit near the spiral center; dirs before files at equal size.
-            foreach (FileNode child in children
-                .OrderByDescending(c => c.SizeBytes)
-                .ThenByDescending(c => c.IsDirectory)
-                .ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase))
+            // Biggest first packs densest; same ordering as previews (seamless re-root).
+            foreach (FileNode child in OrderChildren(children))
             {
                 entries.Add((child, _currentVolume, SizeScaledRadius(child),
                     child.SizeBytes > 0 ? $"{child.Name}  ({FormatSize(child.SizeBytes)})" : child.Name));
@@ -546,6 +566,129 @@ public sealed class GraphView
 
         RequestFrames();
         LevelChanged?.Invoke();
+    }
+
+    private static IEnumerable<FileNode> OrderChildren(IEnumerable<FileNode> children) => children
+        .OrderByDescending(c => c.SizeBytes)
+        .ThenByDescending(c => c.IsDirectory)
+        .ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Cached deterministic pack of a dir's children (same ordering/radii as a real level).</summary>
+    private ChildPack? GetPreview(VolumeIndex volume, ulong parentFrn)
+    {
+        if (_previewCache.TryGetValue((volume, parentFrn), out ChildPack? cached))
+            return cached;
+
+        if (_previewBudget <= 0)
+        {
+            RequestFrames(); // finish building over the next frames
+            return null;
+        }
+        _previewBudget--;
+
+        IReadOnlyList<FileNode> children = parentFrn == VolumeIndex.SyntheticRootId
+            ? volume.RootEntries
+            : volume.GetChildren(parentFrn);
+        FileNode[] files = OrderChildren(children).Take(MaxPreviewChildren).ToArray();
+
+        var circles = new CirclePacker.Circle[files.Length];
+        for (int i = 0; i < files.Length; i++)
+            circles[i] = new CirclePacker.Circle(SizeScaledRadius(files[i]));
+        float packRadius = (float)CirclePacker.Pack(circles, PackPadding);
+
+        var positions = new Vector2[files.Length];
+        var radii = new float[files.Length];
+        for (int i = 0; i < files.Length; i++)
+        {
+            positions[i] = new Vector2((float)circles[i].X, (float)circles[i].Y);
+            radii[i] = (float)circles[i].R;
+        }
+
+        if (_previewCache.Count >= PreviewCacheCap)
+            _previewCache.Clear();
+        var pack = new ChildPack(files, positions, radii, packRadius);
+        _previewCache[(volume, parentFrn)] = pack;
+        return pack;
+    }
+
+    // --- continuous zoom navigation (semantic zoom re-rooting) ---
+
+    /// <summary>
+    /// Zooming INTO a dir until it fills the viewport re-roots the level to it; zooming
+    /// the whole level down to a speck re-roots out to the parent. Camera remaps are
+    /// screen-invariant, so the world never visibly jumps — this is what makes the
+    /// universe continuously zoomable at any depth.
+    /// </summary>
+    private void EvaluateAutoNavigation()
+    {
+        if (_machine is null || _pendingLevelSwap is not null || _dragSource is not null
+            || !_hasDrawn || Camera.Settled)
+            return;
+
+        float minVp = MathF.Min(_lastViewport.X, _lastViewport.Y);
+        float zoom = Camera.Zoom;
+
+        if (Camera.ZoomTarget > zoom)
+        {
+            Vector2 centerWorld = Camera.ScreenToWorld(_lastViewport / 2f);
+            foreach (GraphNode node in _nodes)
+            {
+                if (!node.File.IsDirectory
+                    || node.Radius * zoom < AutoDrillViewportFrac * minVp
+                    || Vector2.DistanceSquared(centerWorld, node.Position) > node.Radius * node.Radius)
+                    continue;
+                AutoDrillInto(node);
+                return;
+            }
+        }
+        else if (Camera.ZoomTarget < zoom && _currentVolume is not null
+            && _levelRadius * zoom < AutoUpViewportFrac * minVp)
+        {
+            AutoGoUp();
+        }
+    }
+
+    private void AutoDrillInto(GraphNode node)
+    {
+        Vector2 nodePos = node.Position;
+        float nodeRadius = node.Radius;
+
+        if (_currentVolume is null)
+        {
+            _currentVolume = node.Volume;
+            _parentTrail.Clear();
+        }
+        else
+        {
+            _parentTrail.Push(node.File.Id);
+        }
+
+        _highlightedFrn = null;
+        RebuildLevel(resetCamera: false, animateEntrance: false);
+        if (_levelRadius > 0)
+            Camera.RemapDown(nodePos, nodeRadius * PreviewFit / _levelRadius);
+        Camera.UpdateMinZoom(_lastViewport, ContentExtent());
+    }
+
+    private void AutoGoUp()
+    {
+        float oldLevelRadius = _levelRadius;
+        VolumeIndex nodeVolume = _currentVolume!;
+        ulong nodeFrn = 0;
+
+        if (_parentTrail.Count == 0)
+            _currentVolume = null;              // back out to the machine level
+        else
+            nodeFrn = _parentTrail.Pop();
+
+        _highlightedFrn = null;
+        RebuildLevel(resetCamera: false, animateEntrance: false);
+
+        GraphNode host = _nodes.FirstOrDefault(n =>
+            _currentVolume is null ? n.Volume == nodeVolume : n.File.Id == nodeFrn);
+        if (host.File is not null && oldLevelRadius > 0)
+            Camera.RemapUp(host.Position, host.Radius * PreviewFit / oldLevelRadius);
+        Camera.UpdateMinZoom(_lastViewport, ContentExtent());
     }
 
     private float ContentExtent()
@@ -594,6 +737,7 @@ public sealed class GraphView
         float zoom = Camera.Zoom;
         long nowFileTime = DateTime.UtcNow.ToFileTimeUtc();
         _labelRects.Clear();
+        _previewBudget = 2; // at most 2 fresh child packs per frame — no hitches
 
         // Level fade: fading out toward a pending swap, otherwise fully opaque (entrance scales instead).
         float levelAlpha = _pendingLevelSwap is not null ? 1f - _fadeOut.Value : 1f;
@@ -629,7 +773,20 @@ public sealed class GraphView
             if (radius <= 0.01f)
                 continue;
 
-            session.FillCircle(node.Position, radius, WithAlpha(ResolveColor(node.File, nowFileTime), levelAlpha));
+            // Semantic zoom: a big-enough container hollows out (fill fades, ring appears)
+            // and its children render packed inside.
+            Color nodeColor = ResolveColor(node.File, nowFileTime);
+            float reveal = node.File.IsDirectory
+                ? Math.Clamp((radius * zoom - RevealStartScreenR) / (RevealFullScreenR - RevealStartScreenR), 0f, 1f)
+                : 0f;
+            session.FillCircle(node.Position, radius, WithAlpha(nodeColor, levelAlpha * (1f - 0.72f * reveal)));
+            if (reveal > 0f)
+            {
+                session.DrawCircle(node.Position, radius, WithAlpha(nodeColor, levelAlpha * (0.35f + 0.4f * reveal)), 2f / zoom);
+                DrawPreview(session, node.Volume,
+                    _currentVolume is null ? VolumeIndex.SyntheticRootId : node.File.Id,
+                    node.Position, radius, levelAlpha * reveal, zoom, nowFileTime, depth: 0);
+            }
 
             if (_highlightedFrn == node.File.Id && _currentVolume is not null)
                 session.DrawCircle(node.Position, (radius + 6) * pulse, WithAlpha(HighlightColor, levelAlpha), 3f / zoom);
@@ -658,7 +815,7 @@ public sealed class GraphView
         // Diagnostic overlay (debug builds only): live camera/clock numbers for the harness.
         session.Transform = Matrix3x2.Identity;
         session.DrawText(
-            $"vp={_lastViewport.X:F0}x{_lastViewport.Y:F0} zoom={Camera.Zoom:F3} pan={Camera.Pan.X:F0},{Camera.Pan.Y:F0} min={Camera.MinZoom:F3} nodes={_nodes.Count} n0r={(_nodes.Count > 0 ? _nodes[0].Radius : 0):F0} frame={_frameCounter++}",
+            $"vp={_lastViewport.X:F0}x{_lastViewport.Y:F0} zoom={Camera.Zoom:F3} pan={Camera.Pan.X:F0},{Camera.Pan.Y:F0} min={Camera.MinZoom:F3} nodes={_nodes.Count} pv={_previewCache.Count} frame={_frameCounter++}",
             new Vector2(8, 8), Color.FromArgb(255, 255, 255, 0),
             new CanvasTextFormat { FontSize = 12, HorizontalAlignment = CanvasHorizontalAlignment.Left });
         session.Transform = Camera.Transform;
@@ -671,6 +828,48 @@ public sealed class GraphView
             Color ghost = Color.FromArgb(140, DirectoryColor.R, DirectoryColor.G, DirectoryColor.B);
             session.FillCircle(_dragGhostScreen, 14, ghost);
             session.DrawText(drag.File.Name, _dragGhostScreen + new Vector2(0, 18), LabelColor, LabelFormat);
+        }
+    }
+
+    /// <summary>
+    /// Draws a dir's children packed inside its circle, recursing while they stay big
+    /// enough on screen. Hard-culled: sub-1.4px children stop the loop (radii descend),
+    /// offscreen children are skipped.
+    /// </summary>
+    private void DrawPreview(CanvasDrawingSession session, VolumeIndex volume, ulong parentFrn,
+        Vector2 center, float drawnRadius, float alpha, float zoom, long nowFileTime, int depth)
+    {
+        if (depth >= MaxPreviewDepth || alpha <= 0.03f)
+            return;
+        ChildPack? pack = GetPreview(volume, parentFrn);
+        if (pack is null || pack.Files.Length == 0 || pack.PackRadius <= 0)
+            return;
+
+        float scale = drawnRadius * PreviewFit / pack.PackRadius;
+        for (int i = 0; i < pack.Files.Length; i++)
+        {
+            float r = pack.Radii[i] * scale;
+            float screenR = r * zoom;
+            if (screenR < 1.4f)
+                break; // radii descend — everything after is smaller
+
+            Vector2 pos = center + pack.Positions[i] * scale;
+            Vector2 screen = Camera.WorldToScreen(pos);
+            if (screen.X < -screenR || screen.Y < -screenR
+                || screen.X > _lastViewport.X + screenR || screen.Y > _lastViewport.Y + screenR)
+                continue;
+
+            FileNode file = pack.Files[i];
+            Color color = ResolveColor(file, nowFileTime);
+            float childReveal = file.IsDirectory
+                ? Math.Clamp((screenR - RevealStartScreenR) / (RevealFullScreenR - RevealStartScreenR), 0f, 1f)
+                : 0f;
+            session.FillCircle(pos, r, WithAlpha(color, alpha * (1f - 0.72f * childReveal)));
+            if (childReveal > 0f)
+            {
+                session.DrawCircle(pos, r, WithAlpha(color, alpha * (0.35f + 0.4f * childReveal)), 2f / zoom);
+                DrawPreview(session, volume, file.Id, pos, r, alpha * childReveal, zoom, nowFileTime, depth + 1);
+            }
         }
     }
 
