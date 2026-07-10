@@ -50,8 +50,16 @@ public sealed class GraphCamera
         Zoom = _zoomTarget = Math.Clamp(zoom, MinZoom, MaxZoom);
     }
 
+    /// <summary>Reduce-motion mode: flights become jumps.</summary>
+    public bool Instant { get; set; }
+
     public void FlyTo(Vector2 pan, float zoom)
     {
+        if (Instant)
+        {
+            JumpTo(pan, zoom);
+            return;
+        }
         _panTarget = pan;
         _zoomTarget = Math.Clamp(zoom, MinZoom, MaxZoom);
     }

@@ -189,6 +189,28 @@ public sealed class GraphView
 
     public GraphColorMode ColorMode { get; set; } = GraphColorMode.Type;
 
+    /// <summary>Canvas chrome follows the app theme (node palettes work on both).</summary>
+    public bool LightTheme { get; set; }
+
+    private bool _reduceMotion;
+    public bool ReduceMotion
+    {
+        get => _reduceMotion;
+        set
+        {
+            _reduceMotion = value;
+            Camera.Instant = value;
+        }
+    }
+
+    // Themed chrome (labels, edges, cards) — node/selection palettes are theme-neutral.
+    private Color ThemeLabel => LightTheme ? Color.FromArgb(255, 27, 34, 46) : LabelColor;
+    private Color ThemeMuted => LightTheme ? Color.FromArgb(200, 90, 100, 115) : Color.FromArgb(200, 181, 188, 201);
+    private Color ThemeEdge => LightTheme ? Color.FromArgb(90, 43, 94, 133) : EdgeColor;
+    private Color ThemeBadge => LightTheme ? Color.FromArgb(220, 40, 50, 64) : BadgeColor;
+    private Color ThemeCardBg => LightTheme ? Color.FromArgb(242, 250, 252, 255) : Color.FromArgb(240, 22, 28, 37);
+    private Color ThemeCardBorder => LightTheme ? Color.FromArgb(110, 90, 120, 150) : Color.FromArgb(90, 122, 168, 210);
+
     public ulong? SelectedFrn => _selectedFrn;
 
     public GraphView()
@@ -543,6 +565,11 @@ public sealed class GraphView
 
     private void BeginLevelSwap(Action swap)
     {
+        if (_reduceMotion)
+        {
+            swap(); // no fade, no flight — the camera is already Instant
+            return;
+        }
         _pendingLevelSwap = swap;
         _fadeOut.Start();
         RequestFrames();
@@ -742,7 +769,7 @@ public sealed class GraphView
                 _pendingInitialFit = true; // canvas not measured yet (demo builds in ms) — fit on first draw
         }
 
-        if (animateEntrance)
+        if (animateEntrance && !_reduceMotion)
             _entrance.Start();
         else
             _entrance.Finish();
@@ -937,7 +964,7 @@ public sealed class GraphView
         // Level boundary: the parent circle the level is packed inside (replaces the
         // old hierarchy spokes — in a packed layout the container IS the hierarchy).
         if (_levelRadius > 0)
-            session.DrawCircle(Vector2.Zero, _levelRadius, WithAlpha(EdgeColor, levelAlpha), 2f / zoom);
+            session.DrawCircle(Vector2.Zero, _levelRadius, WithAlpha(ThemeEdge, levelAlpha), 2f / zoom);
 
         // Relation edges: anchor → each visible relative (fade with reveal alpha).
         ulong? anchorFrn = _selectedFrn ?? _hoveredFrn;
@@ -1049,7 +1076,7 @@ public sealed class GraphView
         {
             session.Transform = Matrix3x2.Identity;
             foreach (var (worldPos, text) in _badgeQueue)
-                session.DrawText(text, Camera.WorldToScreen(worldPos), BadgeColor, BadgeFormat);
+                session.DrawText(text, Camera.WorldToScreen(worldPos), ThemeBadge, BadgeFormat);
             session.Transform = Camera.Transform;
         }
 
@@ -1069,7 +1096,7 @@ public sealed class GraphView
             session.Transform = Matrix3x2.Identity;
             Color ghost = Color.FromArgb(140, DirectoryColor.R, DirectoryColor.G, DirectoryColor.B);
             session.FillCircle(_dragGhostScreen, 14, ghost);
-            session.DrawText(drag.File.Name, _dragGhostScreen + new Vector2(0, 18), LabelColor, LabelFormat);
+            session.DrawText(drag.File.Name, _dragGhostScreen + new Vector2(0, 18), ThemeLabel, LabelFormat);
         }
 
         DrawMinimap(session);
@@ -1101,10 +1128,10 @@ public sealed class GraphView
         float half = MinimapSize / 2f;
 
         session.FillRoundedRectangle(center.X - half, center.Y - half, MinimapSize, MinimapSize, 10, 10,
-            WithAlpha(Color.FromArgb(230, 16, 21, 29), _minimapAlpha));
+            WithAlpha(ThemeCardBg, _minimapAlpha));
         session.DrawRoundedRectangle(center.X - half, center.Y - half, MinimapSize, MinimapSize, 10, 10,
-            WithAlpha(Color.FromArgb(90, 122, 168, 210), _minimapAlpha), 1f);
-        session.DrawCircle(center, _levelRadius * scale, WithAlpha(EdgeColor, _minimapAlpha), 1f);
+            WithAlpha(ThemeCardBorder, _minimapAlpha), 1f);
+        session.DrawCircle(center, _levelRadius * scale, WithAlpha(ThemeEdge, _minimapAlpha), 1f);
 
         int dots = Math.Min(_nodes.Count, MinimapMaxDots);
         for (int i = 0; i < dots; i++)
@@ -1122,7 +1149,7 @@ public sealed class GraphView
         float r = Math.Clamp(bottomRight.X, center.X - half, center.X + half);
         float b = Math.Clamp(bottomRight.Y, center.Y - half, center.Y + half);
         session.DrawRectangle(l, t, r - l, b - t,
-            WithAlpha(Color.FromArgb(200, 235, 240, 248), _minimapAlpha), 1.5f);
+            WithAlpha(LightTheme ? Color.FromArgb(220, 40, 50, 64) : Color.FromArgb(200, 235, 240, 248), _minimapAlpha), 1.5f);
 
         session.Transform = Camera.Transform;
     }
@@ -1270,8 +1297,8 @@ public sealed class GraphView
         pos.X = Math.Clamp(pos.X, 8f, _lastViewport.X - W - 8f);
         pos.Y = Math.Clamp(pos.Y, 8f, _lastViewport.Y - H - 8f);
 
-        session.FillRoundedRectangle(pos.X, pos.Y, W, H, 10, 10, WithAlpha(Color.FromArgb(240, 22, 28, 37), a));
-        session.DrawRoundedRectangle(pos.X, pos.Y, W, H, 10, 10, WithAlpha(Color.FromArgb(90, 122, 168, 210), a), 1f);
+        session.FillRoundedRectangle(pos.X, pos.Y, W, H, 10, 10, WithAlpha(ThemeCardBg, a));
+        session.DrawRoundedRectangle(pos.X, pos.Y, W, H, 10, 10, WithAlpha(ThemeCardBorder, a), 1f);
 
         // Thumbnail (media) or icon; requested here — hover is exactly when it's wanted.
         CanvasBitmap? image = null;
@@ -1298,12 +1325,12 @@ public sealed class GraphView
         string line2 = node.File.IsDirectory
             ? $"{node.Volume.GetChildren(node.File.Id).Count:N0} items · {FormatSize(node.File.SizeBytes)}"
             : $"{FormatSize(node.File.SizeBytes)} · {CategoryLabel(node.Category)}";
-        session.DrawText(name, new Vector2(textX, pos.Y + 12), WithAlpha(LabelColor, a), PeekTitleFormat);
-        session.DrawText(line2, new Vector2(textX, pos.Y + 36), WithAlpha(Color.FromArgb(200, 181, 188, 201), a), PeekBodyFormat);
+        session.DrawText(name, new Vector2(textX, pos.Y + 12), WithAlpha(ThemeLabel, a), PeekTitleFormat);
+        session.DrawText(line2, new Vector2(textX, pos.Y + 36), WithAlpha(ThemeMuted, a), PeekBodyFormat);
         if (node.File.LastWriteFileTime > 0)
         {
             string modified = "Modified " + DateTime.FromFileTimeUtc(node.File.LastWriteFileTime).ToLocalTime().ToString("g");
-            session.DrawText(modified, new Vector2(textX, pos.Y + 56), WithAlpha(Color.FromArgb(170, 181, 188, 201), a), PeekBodyFormat);
+            session.DrawText(modified, new Vector2(textX, pos.Y + 56), WithAlpha(ThemeMuted, a * 0.85f), PeekBodyFormat);
         }
 
         session.Transform = Camera.Transform;
@@ -1398,7 +1425,7 @@ public sealed class GraphView
             if (force || LabelSpotFree(rect, index, zoom))
             {
                 _labelRects.Add(rect);
-                session.DrawText(node.Label, new Vector2(node.Position.X, top), WithAlpha(LabelColor, levelAlpha), LabelFormat);
+                session.DrawText(node.Label, new Vector2(node.Position.X, top), WithAlpha(ThemeLabel, levelAlpha), LabelFormat);
                 return;
             }
         }

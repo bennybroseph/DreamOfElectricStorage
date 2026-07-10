@@ -35,6 +35,9 @@ public sealed partial class MainPage : Page
     private Microsoft.UI.Xaml.DispatcherTimer? _searchDebounce;
     private DateTimeOffset _lastDrill = DateTimeOffset.MinValue;
 
+    private readonly SettingsStore _settings = SettingsStore.Load();
+    private bool _settingsUiReady;
+
     public MainPage()
     {
         InitializeComponent();
@@ -69,6 +72,83 @@ public sealed partial class MainPage : Page
             }
         };
         KeyboardAccelerators.Add(deleteKey);
+
+        // Settings are the source of truth; flyout controls seed on open (a RadioButtons
+        // inside an unopened Flyout silently drops SelectedIndex — its items don't exist yet).
+        LegendToggle.IsOn = _settings.ShowLegend;
+        MotionToggle.IsOn = _settings.ReduceMotion;
+        _settingsUiReady = true;
+        ActualThemeChanged += (_, _) => ApplyCanvasTheme();
+        ApplySettings();
+    }
+
+    private void OnSettingsFlyoutOpened(object sender, object e)
+    {
+        _settingsUiReady = false;
+        ThemeChoice.SelectedIndex = ThemeIndex(_settings.Theme);
+        _settingsUiReady = true;
+    }
+
+    // --- settings ---
+
+    private static int ThemeIndex(string theme) => theme.ToLowerInvariant() switch
+    {
+        "light" => 1,
+        "dark" => 2,
+        _ => 0,
+    };
+
+    private void ApplySettings()
+    {
+        RequestedTheme = _settings.Theme switch
+        {
+            "Light" => ElementTheme.Light,
+            "Dark" => ElementTheme.Dark,
+            _ => ElementTheme.Default,
+        };
+        ApplyCanvasTheme();
+        LegendPanel.Visibility = _settings.ShowLegend && _graph.ColorMode != GraphColorMode.None
+            ? Visibility.Visible : Visibility.Collapsed;
+        _graph.ReduceMotion = _settings.ReduceMotion;
+        GraphCanvas.Invalidate();
+    }
+
+    /// <summary>Canvas chrome follows ActualTheme (covers "System" flips while running).</summary>
+    private void ApplyCanvasTheme()
+    {
+        bool light = ActualTheme == ElementTheme.Light;
+        _graph.LightTheme = light;
+        GraphCanvas.ClearColor = light
+            ? Windows.UI.Color.FromArgb(255, 242, 245, 249)
+            : Windows.UI.Color.FromArgb(255, 20, 24, 31);
+        GraphCanvas.Invalidate();
+    }
+
+    private void OnThemeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_settingsUiReady || ThemeChoice.SelectedItem is not string theme)
+            return;
+        _settings.Theme = theme;
+        _settings.Save();
+        ApplySettings();
+    }
+
+    private void OnLegendToggled(object sender, RoutedEventArgs e)
+    {
+        if (!_settingsUiReady)
+            return;
+        _settings.ShowLegend = LegendToggle.IsOn;
+        _settings.Save();
+        ApplySettings();
+    }
+
+    private void OnMotionToggled(object sender, RoutedEventArgs e)
+    {
+        if (!_settingsUiReady)
+            return;
+        _settings.ReduceMotion = MotionToggle.IsOn;
+        _settings.Save();
+        ApplySettings();
     }
 
     private void OnColorModeChanged(object sender, SelectionChangedEventArgs e)
@@ -78,6 +158,7 @@ public sealed partial class MainPage : Page
 
         _graph.ColorMode = (GraphColorMode)ColorModeCombo.SelectedIndex;
         RefreshLegend();
+        ApplySettings(); // legend overlay visibility depends on color mode
         GraphCanvas.Invalidate();
     }
 
@@ -911,6 +992,20 @@ public sealed partial class MainPage : Page
 
             case "perf":
                 return _graph.PerfReport();
+
+            case "settings": // settings theme <system|light|dark> | legend <on|off> | motion <on|off>
+                switch (parts[1].ToLowerInvariant())
+                {
+                    case "theme":
+                        _settings.Theme = ThemeIndex(parts[2]) switch { 1 => "Light", 2 => "Dark", _ => "System" };
+                        _settings.Save();
+                        ApplySettings();
+                        break;
+                    case "legend": LegendToggle.IsOn = parts[2] == "on"; break;
+                    case "motion": MotionToggle.IsOn = parts[2] == "on"; break;
+                    default: return "err unknown setting";
+                }
+                return $"ok theme={_settings.Theme} legend={_settings.ShowLegend} motion={_settings.ReduceMotion}";
 
             case "crumb": // crumb <index> — clickable-breadcrumb navigation
                 _graph.NavigateToSegment(int.Parse(parts[1]));
