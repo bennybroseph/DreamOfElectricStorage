@@ -235,14 +235,62 @@ public sealed partial class MainPage : Page
 
     private void OnGraphLevelChanged()
     {
-        BreadcrumbText.Text = _graph.Breadcrumb;
+        BreadcrumbTrail.ItemsSource = _graph.BreadcrumbSegments;
         UpButton.IsEnabled = _graph.CanGoUp;
         GraphCanvas.Invalidate();
     }
 
+    private void OnBreadcrumbClicked(BreadcrumbBar sender, BreadcrumbBarItemClickedEventArgs args) =>
+        _graph.NavigateToSegment(args.Index);
+
     private void OnUpClick(object sender, RoutedEventArgs e) => _graph.GoUp();
 
     private void OnHomeClick(object sender, RoutedEventArgs e) => _graph.ZoomHome();
+
+    // --- pinned places ---
+
+    private readonly PinStore _pins = new();
+
+    private void OnPinsFlyoutOpening(object sender, object e)
+    {
+        PinsFlyout.Items.Clear();
+
+        string? current = _graph.CanGoUp || _graph.CurrentVolume is not null ? _graph.Breadcrumb : null;
+        var toggle = new MenuFlyoutItem
+        {
+            Text = current is not null && _pins.Contains(current)
+                ? $"Unpin  {current}"
+                : $"Pin  {current ?? "(nothing to pin here)"}",
+            IsEnabled = current is not null,
+        };
+        toggle.Click += (_, _) => { if (current is not null) _pins.Toggle(current); };
+        PinsFlyout.Items.Add(toggle);
+
+        if (_pins.Pins.Count > 0)
+            PinsFlyout.Items.Add(new MenuFlyoutSeparator());
+        foreach (string pin in _pins.Pins)
+        {
+            var item = new MenuFlyoutItem { Text = pin };
+            item.Click += (_, _) => NavigateToPin(pin);
+            PinsFlyout.Items.Add(item);
+        }
+    }
+
+    private void NavigateToPin(string path)
+    {
+        if (_machine is null)
+            return;
+        foreach (VolumeIndex volume in _machine.Volumes)
+        {
+            if (volume.FindByPath(path) is { } frn)
+            {
+                _graph.NavigateInto(volume, frn);
+                GraphCanvas.Invalidate();
+                return;
+            }
+        }
+        StatusText.Text = $"pin not found: {path}";
+    }
 
     private void OnCanvasDraw(CanvasControl sender, CanvasDrawEventArgs args) =>
         _graph.Draw(sender, args.DrawingSession);
@@ -251,9 +299,13 @@ public sealed partial class MainPage : Page
 
     private void OnCanvasPointerPressed(object sender, PointerRoutedEventArgs e)
     {
+        Vector2 pressed = e.GetCurrentPoint(GraphCanvas).Position.ToVector2();
+        if (_graph.IsInMinimap(pressed))
+            return; // minimap click = jump (handled in TapAt); never a pan/drag
+
         _isPointerDown = true;
         _pointerMoved = false;
-        _lastPointer = e.GetCurrentPoint(GraphCanvas).Position.ToVector2();
+        _lastPointer = pressed;
         // Node press = potential drag-move; empty-space press = pan.
         _pressedOnNode = _graph.TryGetNodeAt(_lastPointer) is { IsVolumeNode: false };
         GraphCanvas.CapturePointer(e.Pointer);
@@ -333,6 +385,9 @@ public sealed partial class MainPage : Page
     /// <summary>Shared tap path (real Tapped event + test channel): drill/select/deselect.</summary>
     private void TapAt(Vector2 point)
     {
+        if (_graph.TryMinimapJump(point))
+            return;
+
         bool couldDrill = _graph.TryGetNodeAt(point) is { } hit
             && (hit.IsVolumeNode || hit.File.IsDirectory);
         if (couldDrill)
@@ -780,6 +835,25 @@ public sealed partial class MainPage : Page
 
             case "perf":
                 return _graph.PerfReport();
+
+            case "crumb": // crumb <index> — clickable-breadcrumb navigation
+                _graph.NavigateToSegment(int.Parse(parts[1]));
+                return $"ok {string.Join(" > ", _graph.BreadcrumbSegments)}";
+
+            case "pin": // toggle pin on the current location
+            {
+                string current = _graph.Breadcrumb;
+                if (current == "Computer")
+                    return "err nothing to pin at machine level";
+                return _pins.Toggle(current) ? $"pinned {current}" : $"unpinned {current}";
+            }
+
+            case "pins":
+                return _pins.Pins.Count == 0 ? "0 pins" : string.Join('\n', _pins.Pins);
+
+            case "pinnav": // pinnav <index>
+                NavigateToPin(_pins.Pins[int.Parse(parts[1])]);
+                return "ok";
 
             case "state":
             {

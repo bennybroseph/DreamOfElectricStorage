@@ -163,6 +163,12 @@ public sealed class GraphView
 
     /// <summary>Shell image source. MainPage marshals its Ready event to a canvas invalidate.</summary>
     public ShellImageLoader Images { get; } = new();
+
+    // Minimap (V6): appears when the level overflows the viewport; click to jump.
+    private const float MinimapSize = 176f;
+    private const float MinimapMargin = 16f;
+    private const int MinimapMaxDots = 600;
+    private float _minimapAlpha;                             // eased toward Show target in Advance
 #if DEBUG
     private long _frameCounter;
 #endif
@@ -185,7 +191,17 @@ public sealed class GraphView
         _clock.Tick += Advance;
         _clock.IsIdle = () =>
             Camera.Settled && !_fadeOut.Running && !_entrance.Running && _pendingLevelSwap is null
-            && _swell.Count == 0 && RevealSettled && _pulseElapsed >= PulseSeconds && _dragSource is null;
+            && _swell.Count == 0 && RevealSettled && _pulseElapsed >= PulseSeconds && _dragSource is null
+            && MinimapSettled;
+    }
+
+    private bool MinimapSettled
+    {
+        get
+        {
+            float target = _levelRadius * Camera.Zoom > 0.9f * MathF.Min(_lastViewport.X, _lastViewport.Y) ? 1f : 0f;
+            return MathF.Abs(_minimapAlpha - target) < 0.01f;
+        }
     }
 
     private bool RevealSettled
@@ -239,9 +255,109 @@ public sealed class GraphView
         if (_dragSource is not null)
             _dragGhostScreen += (_dragGhostTarget - _dragGhostScreen) * Easings.Approach(20f, dt);
 
+        // Minimap fades in when the level overflows the viewport (you can be lost).
+        float minimapTarget = _levelRadius * Camera.Zoom > 0.9f * MathF.Min(_lastViewport.X, _lastViewport.Y) ? 1f : 0f;
+        _minimapAlpha += (minimapTarget - _minimapAlpha) * Easings.Approach(10f, dt);
+        if (MathF.Abs(_minimapAlpha - minimapTarget) < 0.01f)
+            _minimapAlpha = minimapTarget;
+
         EvaluateAutoNavigation();
 
         RedrawNeeded?.Invoke();
+    }
+
+    /// <summary>
+    /// Trail as clickable segments: ["Computer"], then the volume, then each dir.
+    /// Index into this list with <see cref="NavigateToSegment"/>.
+    /// </summary>
+    public IReadOnlyList<string> BreadcrumbSegments
+    {
+        get
+        {
+            var segments = new List<string> { "Computer" };
+            if (_currentVolume is null)
+                return segments;
+            segments.Add(_currentVolume.Volume);
+            foreach (ulong frn in _parentTrail.Reverse()) // stack enumerates top-first
+                segments.Add(_currentVolume.TryGetNode(frn, out FileNode node) ? node.Name : "?");
+            return segments;
+        }
+    }
+
+    /// <summary>Jump to an ancestor level by breadcrumb index (0 = Computer, 1 = volume root…).</summary>
+    public void NavigateToSegment(int index)
+    {
+        int current = 1 + (_currentVolume is null ? -1 : _parentTrail.Count);
+        if (_pendingLevelSwap is not null || index >= current || index < 0)
+            return;
+
+        _highlightedFrn = null;
+        Camera.FlyTo(Camera.Pan + (_lastViewport / 2f - Camera.Pan) * 0.5f, Camera.Zoom * 0.45f); // recede
+        BeginLevelSwap(() =>
+        {
+            if (index == 0)
+            {
+                _currentVolume = null;
+                _parentTrail.Clear();
+            }
+            else
+            {
+                while (_parentTrail.Count > index - 1)
+                    _parentTrail.Pop();
+            }
+            RebuildLevel();
+        });
+    }
+
+    /// <summary>Lands INSIDE a directory (pins are places to be, not things to look at).</summary>
+    public void NavigateInto(VolumeIndex volume, ulong frn)
+    {
+        if (frn == VolumeIndex.SyntheticRootId)
+        {
+            BeginLevelSwap(() =>
+            {
+                _currentVolume = volume;
+                _parentTrail.Clear();
+                _highlightedFrn = null;
+                RebuildLevel();
+            });
+            return;
+        }
+
+        if (!volume.TryGetNode(frn, out FileNode node))
+            return;
+        if (!node.IsDirectory)
+        {
+            NavigateTo(volume, frn); // files: highlight in their parent as before
+            return;
+        }
+
+        BeginLevelSwap(() =>
+        {
+            _currentVolume = volume;
+            _parentTrail.Clear();
+            foreach (ulong ancestor in BuildTrailTo(volume, node))
+                _parentTrail.Push(ancestor);
+            _parentTrail.Push(frn);
+            _highlightedFrn = null;
+            RebuildLevel();
+        });
+    }
+
+    /// <summary>Ancestor FRNs root-first (same guards as GetPath).</summary>
+    private static List<ulong> BuildTrailTo(VolumeIndex volume, FileNode node)
+    {
+        var ancestors = new List<ulong>();
+        FileNode? current = node;
+        for (int depth = 0; current is not null && depth < 512; depth++)
+        {
+            if (current.ParentId == current.Id || !volume.TryGetNode(current.ParentId, out FileNode parent))
+                break;
+            ancestors.Add(parent.Id);
+            current = parent;
+        }
+        ancestors.Reverse();
+        return ancestors;
     }
 
     /// <summary>Human-readable location, e.g. "Computer" or "D:\Documents\GitHub".</summary>
@@ -379,21 +495,9 @@ public sealed class GraphView
 
         BeginLevelSwap(() =>
         {
-            // Rebuild the trail root→parent by walking ancestors (same guards as GetPath).
-            var ancestors = new List<ulong>();
-            FileNode? current = node;
-            for (int depth = 0; current is not null && depth < 512; depth++)
-            {
-                if (current.ParentId == current.Id || !volume.TryGetNode(current.ParentId, out FileNode parent))
-                    break;
-                ancestors.Add(parent.Id);
-                current = parent;
-            }
-            ancestors.Reverse();
-
             _currentVolume = volume;
             _parentTrail.Clear();
-            foreach (ulong ancestor in ancestors)
+            foreach (ulong ancestor in BuildTrailTo(volume, node))
                 _parentTrail.Push(ancestor);
 
             _highlightedFrn = frn;
@@ -947,9 +1051,81 @@ public sealed class GraphView
             session.DrawText(drag.File.Name, _dragGhostScreen + new Vector2(0, 18), LabelColor, LabelFormat);
         }
 
+        DrawMinimap(session);
+
         _drawTimer.Stop();
         if (_drawSamples.Count < 4096)
             _drawSamples.Add(_drawTimer.Elapsed.TotalMilliseconds);
+    }
+
+    // --- minimap ---
+
+    private (Vector2 Center, float Scale) MinimapTransform()
+    {
+        Vector2 center = new(
+            _lastViewport.X - MinimapMargin - MinimapSize / 2f,
+            _lastViewport.Y - MinimapMargin - MinimapSize / 2f);
+        float scale = (MinimapSize / 2f - 10f) / MathF.Max(ContentExtent(), 1f);
+        return (center, scale);
+    }
+
+    private void DrawMinimap(CanvasDrawingSession session)
+    {
+        if (_minimapAlpha <= 0.02f || _nodes.Count == 0)
+            return;
+
+        session.Transform = Matrix3x2.Identity;
+        var (center, scale) = MinimapTransform();
+        float half = MinimapSize / 2f;
+
+        session.FillRoundedRectangle(center.X - half, center.Y - half, MinimapSize, MinimapSize, 10, 10,
+            WithAlpha(Color.FromArgb(230, 16, 21, 29), _minimapAlpha));
+        session.DrawRoundedRectangle(center.X - half, center.Y - half, MinimapSize, MinimapSize, 10, 10,
+            WithAlpha(Color.FromArgb(90, 122, 168, 210), _minimapAlpha), 1f);
+        session.DrawCircle(center, _levelRadius * scale, WithAlpha(EdgeColor, _minimapAlpha), 1f);
+
+        int dots = Math.Min(_nodes.Count, MinimapMaxDots);
+        for (int i = 0; i < dots; i++)
+        {
+            GraphNode node = _nodes[i];
+            session.FillCircle(center + node.Position * scale, MathF.Max(node.Radius * scale, 1f),
+                WithAlpha(ResolveColor(node.File, node.Category, 0), _minimapAlpha * 0.85f));
+        }
+
+        // Viewport rectangle in level space (clamped to the panel).
+        Vector2 topLeft = center + Camera.ScreenToWorld(Vector2.Zero) * scale;
+        Vector2 bottomRight = center + Camera.ScreenToWorld(_lastViewport) * scale;
+        float l = Math.Clamp(topLeft.X, center.X - half, center.X + half);
+        float t = Math.Clamp(topLeft.Y, center.Y - half, center.Y + half);
+        float r = Math.Clamp(bottomRight.X, center.X - half, center.X + half);
+        float b = Math.Clamp(bottomRight.Y, center.Y - half, center.Y + half);
+        session.DrawRectangle(l, t, r - l, b - t,
+            WithAlpha(Color.FromArgb(200, 235, 240, 248), _minimapAlpha), 1.5f);
+
+        session.Transform = Camera.Transform;
+    }
+
+    /// <summary>True (and camera flies) when the point lands on the visible minimap.</summary>
+    public bool TryMinimapJump(Vector2 canvasPoint)
+    {
+        if (!IsInMinimap(canvasPoint))
+            return false;
+
+        var (center, scale) = MinimapTransform();
+        Vector2 world = (canvasPoint - center) / scale;
+        Camera.FlyTo(_lastViewport / 2f - world * Camera.Zoom, Camera.Zoom);
+        RequestFrames();
+        return true;
+    }
+
+    public bool IsInMinimap(Vector2 canvasPoint)
+    {
+        if (_minimapAlpha < 0.5f)
+            return false;
+        var (center, _) = MinimapTransform();
+        float half = MinimapSize / 2f;
+        return canvasPoint.X >= center.X - half && canvasPoint.X <= center.X + half
+            && canvasPoint.Y >= center.Y - half && canvasPoint.Y <= center.Y + half;
     }
 
     /// <summary>

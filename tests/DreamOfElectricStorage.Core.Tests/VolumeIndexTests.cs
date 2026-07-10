@@ -176,6 +176,26 @@ public class VolumeIndexTests
         Assert.Equal(5, final.NodesIndexed);
     }
 
+    [Fact]
+    public async Task FindByPath_WalksSegmentsCaseInsensitively()
+    {
+        var index = await BuildAsync(SampleTree);
+
+        Assert.Equal(11ul, index.FindByPath(@"C:\users\BENNY"));
+        Assert.Equal(12ul, index.FindByPath(@"C:\Users\benny\notes.txt"));
+        Assert.Equal(VolumeIndex.SyntheticRootId, index.FindByPath(@"C:\"));
+        Assert.Equal(VolumeIndex.SyntheticRootId, index.FindByPath("C:"));
+    }
+
+    [Fact]
+    public async Task FindByPath_ReturnsNullForMissingOrForeign()
+    {
+        var index = await BuildAsync(SampleTree);
+
+        Assert.Null(index.FindByPath(@"C:\Users\nobody"));
+        Assert.Null(index.FindByPath(@"D:\Users\benny"));
+    }
+
     /// <summary>Invokes the callback inline (Progress&lt;T&gt; posts to a sync context, racing tests).</summary>
     private sealed class SynchronousProgress(Action<VolumeIndexProgress> callback) : IProgress<VolumeIndexProgress>
     {

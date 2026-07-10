@@ -203,6 +203,39 @@ public sealed class VolumeIndex
     public IReadOnlyList<FileNode> GetChildren(ulong parentId) =>
         _childrenByParent.TryGetValue(parentId, out List<FileNode>? children) ? children : [];
 
+    /// <summary>
+    /// Resolves a full path (e.g. "C:\Users\benny") to its FRN by walking name segments
+    /// from the root, case-insensitively. Returns SyntheticRootId for the bare volume,
+    /// null when any segment is missing. Survives re-indexing where FRNs may not.
+    /// </summary>
+    public ulong? FindByPath(string path)
+    {
+        if (!path.StartsWith(Volume, StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        string rest = path[Volume.Length..].Trim('\\');
+        if (rest.Length == 0)
+            return SyntheticRootId;
+
+        ulong current = SyntheticRootId;
+        foreach (string segment in rest.Split('\\'))
+        {
+            FileNode? match = null;
+            foreach (FileNode child in GetChildren(current))
+            {
+                if (string.Equals(child.Name, segment, StringComparison.OrdinalIgnoreCase))
+                {
+                    match = child;
+                    break;
+                }
+            }
+            if (match is null)
+                return null;
+            current = match.Id;
+        }
+        return current;
+    }
+
     /// <summary>Full path of a node, e.g. "C:\Users\benny\file.txt". Null if the id is unknown.</summary>
     public string? GetPath(ulong id)
     {

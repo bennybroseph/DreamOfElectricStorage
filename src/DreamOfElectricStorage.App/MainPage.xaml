@@ -42,6 +42,11 @@
             <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                 <Button x:Name="UpButton" Content="&#x2191; Up" IsEnabled="False" Click="OnUpClick" />
                 <Button x:Name="HomeButton" Content="&#x2302;" ToolTipService.ToolTip="Zoom to fit (Home)" Click="OnHomeClick" />
+                <DropDownButton x:Name="PinsButton" Content="&#x2605;" ToolTipService.ToolTip="Pinned places">
+                    <DropDownButton.Flyout>
+                        <MenuFlyout x:Name="PinsFlyout" Opening="OnPinsFlyoutOpening" />
+                    </DropDownButton.Flyout>
+                </DropDownButton>
             </StackPanel>
             <AutoSuggestBox
                 x:Name="SearchBox"
@@ -84,8 +89,8 @@
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
             </ItemsControl>
-            <TextBlock x:Name="BreadcrumbText" Grid.Column="4" VerticalAlignment="Center"
-                       Style="{StaticResource BodyStrongTextBlockStyle}" Text="" TextTrimming="CharacterEllipsis" />
+            <BreadcrumbBar x:Name="BreadcrumbTrail" Grid.Column="4" VerticalAlignment="Center"
+                           ItemClicked="OnBreadcrumbClicked" />
             <TextBlock x:Name="StatusText" Grid.Column="5" VerticalAlignment="Center"
                        Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.8" Text="" />
         </Grid>
