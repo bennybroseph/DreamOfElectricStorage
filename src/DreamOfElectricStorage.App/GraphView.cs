@@ -22,8 +22,7 @@ public sealed class GraphView
 {
     private const float DirectoryRadius = 26f;
     private const float FileRadius = 12f;
-    private const float SpiralSpacing = 34f;               // phyllotaxis: r = spacing·√i
-    private const float GoldenAngle = 2.39996323f;
+    private const float PackPadding = 7f;                  // min world-unit gap between packed nodes
     private const float LabelMinScreenRadius = 9f;         // hide labels when nodes get tiny
     private const float HoverSwell = 0.18f;                // hovered node grows 18%
     private const float FadeOutSeconds = 0.18f;
@@ -83,6 +82,7 @@ public sealed class GraphView
 
     private MachineIndex? _machine;
     private readonly List<GraphNode> _nodes = [];
+    private float _levelRadius;                              // enclosing circle of the packed level
     private ulong? _highlightedFrn;
 
     // Relationship reveal: selection is sticky, hover is transient; selection wins as anchor.
@@ -108,6 +108,7 @@ public sealed class GraphView
     private Vector2 _lastViewport = new(1200, 800);
     private bool _hasDrawn;
     private bool _pendingInitialFit;
+    private readonly List<Vector4> _labelRects = [];         // per-frame world-space label rects (L,T,R,B)
 #if DEBUG
     private long _frameCounter;
 #endif
@@ -484,8 +485,8 @@ public sealed class GraphView
         if (_machine is null)
             return;
 
-        // Two-phase: collect entries first, then place on a spiral spaced by the largest
-        // radius so nodes can't overlap. (Interim rule — V2's circle-packing replaces it.)
+        // Two-phase: collect entries (biggest-first), then circle-pack them — dense,
+        // deterministic, overlap-free, with the enclosing circle as the level boundary.
         var entries = new List<(FileNode File, VolumeIndex Volume, float Radius, string Label)>();
         if (_currentVolume is null)
         {
@@ -518,13 +519,16 @@ public sealed class GraphView
             }
         }
 
-        float spacing = SpiralSpacing;
-        foreach (var entry in entries)
-            spacing = MathF.Max(spacing, entry.Radius * 2.2f);
+        var circles = new CirclePacker.Circle[entries.Count];
+        for (int i = 0; i < entries.Count; i++)
+            circles[i] = new CirclePacker.Circle(entries[i].Radius);
+        _levelRadius = (float)CirclePacker.Pack(circles, PackPadding);
+
         for (int i = 0; i < entries.Count; i++)
         {
             var (file, volume, radius, label) = entries[i];
-            _nodes.Add(new GraphNode(file, volume, Spiral(i, spacing), radius, label));
+            _nodes.Add(new GraphNode(file, volume,
+                new Vector2((float)circles[i].X, (float)circles[i].Y), radius, label));
         }
 
         if (resetCamera)
@@ -548,14 +552,11 @@ public sealed class GraphView
     {
         if (_nodes.Count == 0)
             return 100f;
-        float extent = 0f;
+        float extent = _levelRadius;
         foreach (GraphNode node in _nodes)
             extent = MathF.Max(extent, node.Position.Length() + node.Radius);
         return extent + 30f; // label breathing room
     }
-
-    private static Vector2 Spiral(int i, float spacing) =>
-        spacing * MathF.Sqrt(i) * new Vector2(MathF.Cos(i * GoldenAngle), MathF.Sin(i * GoldenAngle));
 
     /// <summary>Log-scaled radius: 1 KB ≈ base, 1 GB+ visibly dominates, clamped for layout sanity.</summary>
     private static float SizeScaledRadius(FileNode node)
@@ -592,13 +593,15 @@ public sealed class GraphView
         session.Transform = Camera.Transform;
         float zoom = Camera.Zoom;
         long nowFileTime = DateTime.UtcNow.ToFileTimeUtc();
+        _labelRects.Clear();
 
         // Level fade: fading out toward a pending swap, otherwise fully opaque (entrance scales instead).
         float levelAlpha = _pendingLevelSwap is not null ? 1f - _fadeOut.Value : 1f;
 
-        // Hierarchy spokes.
-        foreach (GraphNode node in _nodes)
-            session.DrawLine(Vector2.Zero, node.Position, WithAlpha(EdgeColor, levelAlpha), 1.5f / zoom);
+        // Level boundary: the parent circle the level is packed inside (replaces the
+        // old hierarchy spokes — in a packed layout the container IS the hierarchy).
+        if (_levelRadius > 0)
+            session.DrawCircle(Vector2.Zero, _levelRadius, WithAlpha(EdgeColor, levelAlpha), 2f / zoom);
 
         // Relation edges: anchor → each visible relative (fade with reveal alpha).
         ulong? anchorFrn = _selectedFrn ?? _hoveredFrn;
@@ -643,11 +646,11 @@ public sealed class GraphView
 
             if (radius * zoom >= LabelMinScreenRadius)
             {
-                session.DrawText(
-                    node.Label,
-                    node.Position + new Vector2(0, radius + 4),
-                    WithAlpha(LabelColor, levelAlpha),
-                    LabelFormat);
+                // Packed layouts collide labels constantly — greedy declutter: nodes are
+                // iterated biggest-first, so big nodes claim label space and overlapping
+                // labels are skipped. The anchor/highlight label always draws.
+                TryDrawLabel(session, i, radius, levelAlpha,
+                    force: node.File.Id == anchorFrn || node.File.Id == _highlightedFrn);
             }
         }
 
@@ -669,6 +672,51 @@ public sealed class GraphView
             session.FillCircle(_dragGhostScreen, 14, ghost);
             session.DrawText(drag.File.Name, _dragGhostScreen + new Vector2(0, 18), LabelColor, LabelFormat);
         }
+    }
+
+    private void TryDrawLabel(CanvasDrawingSession session, int index, float radius, float levelAlpha, bool force)
+    {
+        GraphNode node = _nodes[index];
+        float width = node.Label.Length * LabelFormat.FontSize * 0.52f; // estimate — cheap and close enough for collision
+        float height = LabelFormat.FontSize + 5;
+
+        // Preferred spot is under the node; above is the fallback when a neighbor sits below.
+        Span<float> tops = [node.Position.Y + radius + 4, node.Position.Y - radius - 4 - height];
+        foreach (float top in tops)
+        {
+            float left = node.Position.X - width / 2;
+            var rect = new Vector4(left, top, left + width, top + height);
+            if (force || LabelSpotFree(rect, index))
+            {
+                _labelRects.Add(rect);
+                session.DrawText(node.Label, new Vector2(node.Position.X, top), WithAlpha(LabelColor, levelAlpha), LabelFormat);
+                return;
+            }
+        }
+    }
+
+    private bool LabelSpotFree(Vector4 rect, int index)
+    {
+        foreach (Vector4 other in _labelRects)
+        {
+            if (rect.X < other.Z && rect.Z > other.X && rect.Y < other.W && rect.W > other.Y)
+                return false;
+        }
+
+        // Don't run text across neighboring circles (slight edge clipping is fine —
+        // circles curve away). Dense levels keep edge labels; hover reveals the rest.
+        for (int j = 0; j < _nodes.Count; j++)
+        {
+            if (j == index)
+                continue;
+            Vector2 p = _nodes[j].Position;
+            float cx = Math.Clamp(p.X, rect.X, rect.Z);
+            float cy = Math.Clamp(p.Y, rect.Y, rect.W);
+            float r = _nodes[j].Radius * 0.85f;
+            if ((p.X - cx) * (p.X - cx) + (p.Y - cy) * (p.Y - cy) < r * r)
+                return false;
+        }
+        return true;
     }
 
     /// <summary>Staggered scale-in: early spiral indices land first, tail follows.</summary>
