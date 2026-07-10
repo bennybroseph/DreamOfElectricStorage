@@ -9,6 +9,10 @@
     "DreamOfElectricStorage.App (Demo)": {
       "commandName": "Project",
       "commandLineArgs": "--demo"
+    },
+    "DreamOfElectricStorage.App (Demo Background)": {
+      "commandName": "Project",
+      "commandLineArgs": "--demo --background"
     }
   }
 }

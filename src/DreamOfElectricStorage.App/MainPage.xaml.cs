@@ -96,6 +96,7 @@ public sealed partial class MainPage : Page
     {
         if (App.DemoMode)
         {
+            _testPipe ??= new TestPipeServer(DispatchTestCommandAsync); // harness command channel
             await BuildIndexAsync(); // synthetic volumes, no elevation needed
             return;
         }
@@ -324,12 +325,18 @@ public sealed partial class MainPage : Page
         if (_pointerMoved)
             return; // end of a pan drag, not a node click
 
-        bool couldDrill = _graph.TryGetNodeAt(e.GetPosition(GraphCanvas).ToVector2()) is { } hit
+        TapAt(e.GetPosition(GraphCanvas).ToVector2());
+    }
+
+    /// <summary>Shared tap path (real Tapped event + test channel): drill/select/deselect.</summary>
+    private void TapAt(Vector2 point)
+    {
+        bool couldDrill = _graph.TryGetNodeAt(point) is { } hit
             && (hit.IsVolumeNode || hit.File.IsDirectory);
         if (couldDrill)
             _lastDrill = DateTimeOffset.UtcNow;
 
-        GraphView.NodeHit? selected = _graph.OnTapped(e.GetPosition(GraphCanvas).ToVector2());
+        GraphView.NodeHit? selected = _graph.OnTapped(point);
         GraphCanvas.Invalidate();
 
         if (selected is { } fileHit)
@@ -386,16 +393,24 @@ public sealed partial class MainPage : Page
         if (DateTimeOffset.UtcNow - _lastDrill < TimeSpan.FromMilliseconds(500))
             return;
 
-        if (_graph.TryGetNodeAt(e.GetPosition(GraphCanvas).ToVector2()) is { IsVolumeNode: false } hit
-            && !hit.File.IsDirectory)
-        {
+        DoubleTapAt(e.GetPosition(GraphCanvas).ToVector2());
+    }
+
+    /// <summary>Shared double-tap path (real event + test channel): open files.</summary>
+    private void DoubleTapAt(Vector2 point)
+    {
+        if (_graph.TryGetNodeAt(point) is { IsVolumeNode: false } hit && !hit.File.IsDirectory)
             OpenPath(hit.Volume.GetPath(hit.File.Id));
-        }
     }
 
     private void OnCanvasRightTapped(object sender, RightTappedRoutedEventArgs e)
     {
-        var position = e.GetPosition(GraphCanvas);
+        RightTapAt(e.GetPosition(GraphCanvas));
+    }
+
+    /// <summary>Shared right-tap path (real event + test channel): node context menu.</summary>
+    private void RightTapAt(Windows.Foundation.Point position)
+    {
         if (_graph.TryGetNodeAt(position.ToVector2()) is not { IsVolumeNode: false } hit)
             return;
 
@@ -637,5 +652,144 @@ public sealed partial class MainPage : Page
     {
         SearchBox.Text = result.Name;
         _graph.NavigateTo(result.Volume, result.Frn);
+    }
+
+    // --- test channel (demo mode only) ---
+
+    private TestPipeServer? _testPipe;
+
+    /// <summary>Marshals a pipe command onto the UI thread (single-writer contract).</summary>
+    private Task<string> DispatchTestCommandAsync(string line)
+    {
+        var tcs = new TaskCompletionSource<string>();
+        bool queued = DispatcherQueue.TryEnqueue(() =>
+        {
+            try
+            {
+                tcs.SetResult(ExecuteTestCommand(line));
+            }
+            catch (Exception ex)
+            {
+                tcs.SetResult($"err {ex.Message}");
+            }
+        });
+        if (!queued)
+            tcs.SetResult("err dispatcher queue rejected");
+        return tcs.Task;
+    }
+
+    /// <summary>
+    /// Coordinates are canvas-logical (DIPs, relative to GraphCanvas). `state` reports
+    /// canvasOrigin (physical px in the captured window) + scale for converting from
+    /// CaptureCli screenshots: canvas = (screenshotPx - origin) / scale.
+    /// Commands reuse the real handlers (TapAt/RightTapAt/…) — only XAML's raw
+    /// pointer routing is bypassed; cover that with an occasional real-input pass.
+    /// </summary>
+    private string ExecuteTestCommand(string line)
+    {
+        string[] parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        string verb = parts[0].ToLowerInvariant();
+        float Arg(int i) => float.Parse(parts[i], System.Globalization.CultureInfo.InvariantCulture);
+        Vector2 Point(int i) => new(Arg(i), Arg(i + 1));
+
+        switch (verb)
+        {
+            case "tap":
+                TapAt(Point(1));
+                return "ok";
+
+            case "dbltap":
+                DoubleTapAt(Point(1));
+                return "ok";
+
+            case "righttap":
+                RightTapAt(new Windows.Foundation.Point(Arg(1), Arg(2)));
+                return "ok";
+
+            case "hover":
+                _graph.SetHover(Point(1));
+                GraphCanvas.Invalidate();
+                return "ok";
+
+            case "wheel": // wheel <delta> <x> <y>
+                _graph.Zoom(Arg(1), Point(2));
+                GraphCanvas.Invalidate();
+                return "ok";
+
+            case "drag": // drag <x1> <y1> <x2> <y2> — full move flow; confirm dialog opens unawaited
+                if (!_graph.BeginDrag(Point(1)))
+                    return "ok no-node";
+                _graph.UpdateDrag(Point(3));
+                var drop = _graph.EndDrag();
+                GraphCanvas.Invalidate();
+                if (drop is { } move)
+                {
+                    _ = ConfirmAndMoveAsync(move.Source, move.Target);
+                    return $"ok drop={move.Target.File.Name} (dialog open)";
+                }
+                return "ok no-target";
+
+            case "up":
+                _graph.GoUp();
+                return "ok";
+
+            case "home":
+                _graph.ZoomHome();
+                return "ok";
+
+            case "deselect":
+                _graph.ClearSelection();
+                HideRelatedPanel();
+                GraphCanvas.Invalidate();
+                return "ok";
+
+            case "colormode": // colormode <type|age|none>
+                ColorModeCombo.SelectedIndex = parts[1].ToLowerInvariant() switch
+                {
+                    "age" => 1, "none" => 2, _ => 0,
+                };
+                return "ok";
+
+            case "search": // search <text> — runs the real search, returns hits
+            {
+                SearchBox.Text = string.Join(' ', parts.Skip(1));
+                RunSearch();
+                if (SearchBox.ItemsSource is not List<SearchResult> results || results.Count == 0)
+                    return "0 results";
+                return $"{results.Count} results\n" + string.Join('\n', results.Select(r => $"{r.Name} | {r.Path} | {r.Volume.Volume} {r.Frn}"));
+            }
+
+            case "searchgo": // searchgo <text> — search + navigate to the first hit
+            {
+                SearchBox.Text = string.Join(' ', parts.Skip(1));
+                RunSearch();
+                if (SearchBox.ItemsSource is not List<SearchResult> { Count: > 0 } results)
+                    return "0 results";
+                NavigateToResult(results[0]);
+                return $"ok {results[0].Path}";
+            }
+
+            case "nodes": // visible level in canvas coords: name | x,y | screenRadius | dir/file
+            {
+                var nodes = _graph.GetVisibleNodes();
+                return $"{nodes.Count} nodes\n" + string.Join('\n', nodes.Select(n =>
+                    $"{n.Name} | {n.ScreenPosition.X:F0},{n.ScreenPosition.Y:F0} | r={n.ScreenRadius:F0} | {(n.IsDirectory ? "dir" : "file")} | {n.Frn}"));
+            }
+
+            case "state":
+            {
+                var origin = GraphCanvas.TransformToVisual(null).TransformPoint(new Windows.Foundation.Point(0, 0));
+                double scale = XamlRoot.RasterizationScale;
+                return $"breadcrumb={_graph.Breadcrumb}\ncanUp={_graph.CanGoUp}\n" +
+                    $"zoom={_graph.Camera.Zoom:F3} pan={_graph.Camera.Pan.X:F0},{_graph.Camera.Pan.Y:F0} min={_graph.Camera.MinZoom:F3}\n" +
+                    $"selected={_graph.SelectedFrn?.ToString() ?? "none"}\n" +
+                    $"relatedPanel={RelatedPanel.Visibility}\n" +
+                    $"canvasOrigin={origin.X * scale:F0},{origin.Y * scale:F0} scale={scale:F2}\n" +
+                    $"status={StatusText.Text}";
+            }
+
+            default:
+                return $"err unknown command '{verb}' — tap dbltap righttap hover wheel drag up home deselect colormode search searchgo nodes state";
+        }
     }
 }

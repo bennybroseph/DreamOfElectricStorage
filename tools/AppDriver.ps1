@@ -41,8 +41,8 @@ try { Add-Type -TypeDefinition $src -ErrorAction Stop } catch {}
 
 $proc = Get-Process DreamOfElectricStorage.App -ErrorAction Stop | Where-Object MainWindowHandle -ne 0 | Select-Object -First 1
 $hwnd = $proc.MainWindowHandle
-# Input injection needs the window frontmost; WGC screenshots don't (works occluded).
-if ($Action.ToLowerInvariant() -ne "screenshot") {
+# Input injection needs the window frontmost; WGC screenshots and pipe commands don't.
+if ($Action.ToLowerInvariant() -notin @("screenshot", "cmd")) {
     [Drv]::SetForegroundWindow($hwnd) | Out-Null
     Start-Sleep -Milliseconds 250
 }
@@ -135,6 +135,23 @@ switch ($Action.ToLowerInvariant()) {
             [System.Windows.Forms.SendKeys]::SendWait([string]$ch) 2>$null
         }
         Write-Output "typed"
+    }
+    "cmd" {
+        # In-process command channel (demo mode only) — drives the app without global
+        # input injection: no cursor/keyboard/focus theft. Coordinates are canvas-logical
+        # DIPs; run `cmd state` for the screenshot-px conversion (origin + scale).
+        # Verbs: tap dbltap righttap hover wheel drag up home deselect colormode search searchgo nodes state
+        $pipe = New-Object System.IO.Pipes.NamedPipeClientStream(".", "DreamOfElectricStorage.TestPipe", [System.IO.Pipes.PipeDirection]::InOut)
+        try {
+            $pipe.Connect(3000)
+            $writer = New-Object System.IO.StreamWriter($pipe)
+            $writer.AutoFlush = $true
+            $writer.WriteLine(($Rest -join " "))
+            $reader = New-Object System.IO.StreamReader($pipe)
+            $reader.ReadToEnd()
+        } finally {
+            $pipe.Dispose()
+        }
     }
     default      { Write-Error "unknown action: $Action" }
 }

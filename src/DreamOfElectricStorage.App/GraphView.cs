@@ -78,6 +78,9 @@ public sealed class GraphView
     /// <summary>A node the pointer landed on. IsVolumeNode = machine-level drive circle (no real FRN).</summary>
     public readonly record struct NodeHit(VolumeIndex Volume, FileNode File, bool IsVolumeNode);
 
+    /// <summary>Visible-level node in screen coordinates — lets the test harness aim without reading pixels.</summary>
+    public readonly record struct VisibleNode(string Name, ulong Frn, Vector2 ScreenPosition, float ScreenRadius, bool IsDirectory);
+
     private MachineIndex? _machine;
     private readonly List<GraphNode> _nodes = [];
     private ulong? _highlightedFrn;
@@ -423,6 +426,10 @@ public sealed class GraphView
         }
         return null;
     }
+
+    public IReadOnlyList<VisibleNode> GetVisibleNodes() =>
+        _nodes.Select(n => new VisibleNode(
+            n.File.Name, n.File.Id, Camera.WorldToScreen(n.Position), n.Radius * Camera.Zoom, n.File.IsDirectory)).ToList();
 
     /// <summary>Transient hover reveal + swell. Returns true when the visual state changed.</summary>
     public bool SetHover(Vector2 screenPoint)

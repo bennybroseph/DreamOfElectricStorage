@@ -28,6 +28,14 @@ public partial class App : Application
     public static bool DemoMode { get; } =
         System.Linq.Enumerable.Contains(System.Environment.GetCommandLineArgs(), "--demo", System.StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// "--background": show without activating and at the bottom of the z-order, so
+    /// harness runs never steal focus or cover the user's windows. WGC captures
+    /// occluded windows, so the harness sees it regardless.
+    /// </summary>
+    public static bool BackgroundMode { get; } =
+        System.Linq.Enumerable.Contains(System.Environment.GetCommandLineArgs(), "--background", System.StringComparer.OrdinalIgnoreCase);
+
     private Window? _window;
 
     /// <summary>
@@ -46,6 +54,26 @@ public partial class App : Application
     protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
     {
         _window = new MainWindow();
-        _window.Activate();
+        if (BackgroundMode)
+        {
+            _window.AppWindow.Show(activateWindow: false);
+            SendToBottom(_window);
+        }
+        else
+        {
+            _window.Activate();
+        }
     }
+
+    private static void SendToBottom(Window window)
+    {
+        nint hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+        SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+
+    private const nint HWND_BOTTOM = 1;
+    private const uint SWP_NOSIZE = 0x0001, SWP_NOMOVE = 0x0002, SWP_NOACTIVATE = 0x0010;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool SetWindowPos(nint hWnd, nint hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
 }
