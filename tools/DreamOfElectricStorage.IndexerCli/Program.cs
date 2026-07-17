@@ -48,11 +48,15 @@ static async Task<int> RunClustersAsync(int maxNodes)
 
     long afterBytes = GC.GetTotalMemory(forceFullCollection: true);
 
+    // Wells at the default nesting order (Type → Folder → SimilarName → Duplicate).
+    var wellLayout = new ClusterLayout(graph.Items, graph.FacetKeys, FacetOrder.Default);
+    var wells = wellLayout.Wells();
+
     Console.WriteLine();
     Console.WriteLine($"cluster graph: {graph.Nodes.Count:N0} working-set nodes (of {graph.TotalEligible:N0} eligible files), "
-        + $"{graph.Groups.Count:N0} wells, built in {sw.Elapsed.TotalMilliseconds:N0} ms");
-    foreach (var g in graph.Groups.GroupBy(g => g.Kind).OrderBy(g => g.Key.ToString()))
-        Console.WriteLine($"    {g.Key,-12} {g.Count(),6:N0} wells  ({g.Sum(w => w.MemberIds.Count):N0} memberships)");
+        + $"{wells.Count:N0} wells (default order), built in {sw.Elapsed.TotalMilliseconds:N0} ms");
+    foreach (var g in wells.GroupBy(w => w.Kind).OrderBy(g => g.Key.ToString()))
+        Console.WriteLine($"    {g.Key,-12} {g.Count(),6:N0} wells  ({g.Sum(w => w.Count):N0} members)");
     Console.WriteLine($"graph memory: +{(afterBytes - beforeBytes) / (1024.0 * 1024.0):N1} MB over the index baseline");
 
     // Sanity: the biggest working-set files should be real disk hogs.
@@ -61,7 +65,58 @@ static async Task<int> RunClustersAsync(int maxNodes)
     foreach (var info in graph.Nodes.OrderByDescending(n => n.SizeBytes).Take(8))
         Console.WriteLine($"    {info.SizeBytes / (double)(1L << 30):F2} GB  {info.Volume.GetPath(info.Frn)}");
 
+    // Reproduce the App's LIVE physics on the REAL working set: deterministic pack (as the app
+    // does at startup), then Step() the sim — exactly what happens when a node is touched. Traces
+    // whether it settles or flies (lastMove / how far the farthest node drifts / overlap count).
+    Console.WriteLine();
+    TracePhysics("type-only", graph, new FacetOrder([WellKind.Type]),
+        new LayoutTuning(Anchor: 0.80, Cohesion: 1.0), 60);
+    Console.WriteLine();
+    TracePhysics("default order", graph, FacetOrder.Default, new LayoutTuning(), 60);
+
     return 0;
+}
+
+static void TracePhysics(string label, ClusterGraph graph, FacetOrder order, LayoutTuning tuning, int steps)
+{
+    Console.WriteLine($"physics trace ({label}): pack, then Step() — should settle (lastMove→0), not fly");
+    var layout = new ClusterLayout(graph.Items, graph.FacetKeys, order, tuning);
+    layout.PackDeterministic();
+    var radii = graph.Nodes.Select(n => ClusterLayout.NodeRadius(n.SizeBytes)).ToArray();
+
+    void Line(int s, double move)
+    {
+        var pos = layout.Positions();
+        double maxDist = 0;
+        int nonFinite = 0;
+        foreach (var p in pos)
+        {
+            if (!float.IsFinite(p.X) || !float.IsFinite(p.Y)) { nonFinite++; continue; }
+            maxDist = Math.Max(maxDist, p.Length());
+        }
+        Console.WriteLine($"    step {s,3}: lastMove={move,10:N1}  maxDistFromCenter={maxDist,12:N0}  overlaps={Overlaps(pos, radii),6}  nonFinite={nonFinite}");
+    }
+
+    Line(0, 0); // packed (step 0)
+    for (int s = 1; s <= steps; s++)
+    {
+        double move = layout.Step();
+        if (s <= 5 || s % 10 == 0)
+            Line(s, move);
+    }
+}
+
+static int Overlaps(IReadOnlyList<System.Numerics.Vector2> pos, float[] r)
+{
+    int c = 0;
+    for (int i = 0; i < pos.Count; i++)
+        for (int j = i + 1; j < pos.Count; j++)
+        {
+            float sr = r[i] + r[j];
+            if ((pos[i] - pos[j]).LengthSquared() < sr * sr * 0.9f)
+                c++;
+        }
+    return c;
 }
 
 static async Task<int> RunDupesAsync()

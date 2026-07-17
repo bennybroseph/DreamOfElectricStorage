@@ -39,6 +39,17 @@ public sealed partial class MainPage : Page
     private readonly SettingsStore _settings = SettingsStore.Load();
     private bool _settingsUiReady;
 
+    // Settings "Grouping" list: reorderable facet rows (enabled, top-first) = the nesting order.
+    private readonly System.Collections.ObjectModel.ObservableCollection<FacetRow> _facetRows = [];
+    private static readonly (WellKind Kind, string Label)[] AllFacets =
+    [
+        (WellKind.Type, "Type"),
+        (WellKind.Folder, "Folder"),
+        (WellKind.SimilarName, "Similar names"),
+        (WellKind.Duplicate, "Duplicates"),
+        (WellKind.Date, "Date"),
+    ];
+
     private bool ClustersMode => _settings.ViewMode == "Clusters";
 
     /// <summary>The view currently driving the canvas loop (shared surface only).</summary>
@@ -51,6 +62,8 @@ public sealed partial class MainPage : Page
         _graph.RedrawNeeded += () => GraphCanvas.Invalidate(); // animation clock → repaint
         _clusters.RedrawNeeded += () => GraphCanvas.Invalidate();
         _graph.Images.Ready += () => DispatcherQueue.TryEnqueue(() => GraphCanvas.Invalidate()); // icons arrive off-thread
+        FacetList.ItemsSource = _facetRows;
+        _facetRows.CollectionChanged += OnFacetRowsReordered; // drag-reorder → re-nest
         Loaded += OnPageLoaded;
         RefreshLegend();
 
@@ -100,13 +113,28 @@ public sealed partial class MainPage : Page
         ThemeChoice.SelectedIndex = ThemeIndex(_settings.Theme);
         ViewChoice.SelectedIndex = ClustersMode ? 0 : 1;
         ForcesPanel.Visibility = ClustersMode ? Visibility.Visible : Visibility.Collapsed;
-        ForceSizeSlider.Value = _settings.ForceSizeGravity * 100;
-        ForceDupSlider.Value = _settings.ForceDuplicate * 100;
-        ForceNameSlider.Value = _settings.ForceSimilarName * 100;
-        ForceFolderSlider.Value = _settings.ForceFolder * 100;
-        ForceDateSlider.Value = _settings.ForceDate * 100;
-        ForceTypeSlider.Value = _settings.ForceType * 100;
+        SeedFacetList();
         _settingsUiReady = true;
+    }
+
+    /// <summary>Rebuild the grouping list: enabled facets in saved order first, then the rest disabled.</summary>
+    private void SeedFacetList()
+    {
+        _facetRows.Clear();
+        var enabled = _settings.ToFacetOrder().Enabled;
+        foreach (WellKind k in enabled)
+            _facetRows.Add(new FacetRow { Kind = k, Label = LabelFor(k), Enabled = true });
+        foreach (var (k, label) in AllFacets)
+            if (!enabled.Contains(k))
+                _facetRows.Add(new FacetRow { Kind = k, Label = label, Enabled = false });
+    }
+
+    private static string LabelFor(WellKind kind)
+    {
+        foreach (var (k, label) in AllFacets)
+            if (k == kind)
+                return label;
+        return kind.ToString();
     }
 
     // --- settings ---
@@ -131,7 +159,8 @@ public sealed partial class MainPage : Page
             ? Visibility.Visible : Visibility.Collapsed;
         _graph.ReduceMotion = _clusters.ReduceMotion = _settings.ReduceMotion;
         _graph.ShowSystemFolders = _settings.ShowSystemFolders;
-        _clusters.Weights = _settings.ToForceWeights();
+        _clusters.Tuning = _settings.ToTuning();
+        _clusters.Order = _settings.ToFacetOrder();
         ApplyViewMode();
         GraphCanvas.Invalidate();
     }
@@ -179,29 +208,71 @@ public sealed partial class MainPage : Page
         GraphCanvas.Invalidate();
     }
 
-    private void OnForceChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    private void OnFacetRowsReordered(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
     {
-        if (!_settingsUiReady || sender is not Slider { Tag: string name })
-            return;
-        SetForce(name, e.NewValue / 100.0);
+        // Drag-reorder shows up as a Move; seeding (Reset/Add) is guarded by _settingsUiReady.
+        if (_settingsUiReady && e.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Move)
+            ApplyFacetOrderFromUi();
     }
 
-    /// <summary>Update one cluster force weight (value 0..1) → live re-settle + persist.</summary>
-    private void SetForce(string name, double value)
+    private void OnFacetToggled(object sender, RoutedEventArgs e)
+    {
+        if (!_settingsUiReady || sender is not CheckBox { Tag: FacetRow row } cb)
+            return;
+        row.Enabled = cb.IsChecked == true;
+        ApplyFacetOrderFromUi();
+    }
+
+    /// <summary>Push the current grouping list (enabled rows, top-first) into the layout + persist.</summary>
+    private void ApplyFacetOrderFromUi()
+    {
+        _settings.FacetOrder = [.. _facetRows.Where(r => r.Enabled).Select(r => r.Kind.ToString())];
+        _settings.Save();
+        _clusters.Order = _settings.ToFacetOrder(); // re-packs + re-settles
+        GraphCanvas.Invalidate();
+    }
+
+    // --- pipe helpers (headless; real drag-reorder needs real input) ---
+
+    private string PipeSetFacetOrder(string csv)
+    {
+        _settings.FacetOrder = csv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        _settings.Save();
+        var order = _settings.ToFacetOrder();
+        _clusters.Order = order;
+        GraphCanvas.Invalidate();
+        return "ok order=" + string.Join(",", order.Enabled);
+    }
+
+    private string PipeToggleFacet(string name, bool on)
+    {
+        if (!Enum.TryParse(name, ignoreCase: true, out WellKind kind))
+            return "unknown facet " + name;
+        var list = _settings.ToFacetOrder().Enabled.ToList();
+        if (on && !list.Contains(kind))
+            list.Add(kind);
+        else if (!on)
+            list.Remove(kind);
+        _settings.FacetOrder = [.. list.Select(k => k.ToString())];
+        _settings.Save();
+        _clusters.Order = _settings.ToFacetOrder();
+        GraphCanvas.Invalidate();
+        return "ok order=" + string.Join(",", list);
+    }
+
+    private string PipeSetTuning(string name, double value01)
     {
         switch (name)
         {
-            case "size": _settings.ForceSizeGravity = value; break;
-            case "dupes": _settings.ForceDuplicate = value; break;
-            case "names": _settings.ForceSimilarName = value; break;
-            case "folder": _settings.ForceFolder = value; break;
-            case "date": _settings.ForceDate = value; break;
-            case "type": _settings.ForceType = value; break;
-            default: return;
+            case "anchor" or "sizegravity" or "size": _settings.Anchor = value01; break;
+            case "cohesion": _settings.Cohesion = value01; break;
+            case "repulsion": _settings.Repulsion = value01; break;
+            default: return "unknown tuning " + name;
         }
         _settings.Save();
-        _clusters.Weights = _settings.ToForceWeights(); // setter re-steps the physics
+        _clusters.Tuning = _settings.ToTuning();
         GraphCanvas.Invalidate();
+        return $"ok tuning anchor={_settings.Anchor:F2} cohesion={_settings.Cohesion:F2} repulsion={_settings.Repulsion:F2}";
     }
 
     private void OnThemeChanged(object sender, SelectionChangedEventArgs e)
@@ -463,8 +534,22 @@ public sealed partial class MainPage : Page
         StatusText.Text = $"pin not found: {path}";
     }
 
-    private void OnCanvasDraw(CanvasControl sender, CanvasDrawEventArgs args) =>
-        Active.Draw(sender, args.DrawingSession);
+    private bool _drawErrorShown;
+
+    private void OnCanvasDraw(CanvasControl sender, CanvasDrawEventArgs args)
+    {
+        // A throw here would hard-crash the app (WinUI global handler). Surface it instead so
+        // a render bug shows a message and stays alive.
+        try
+        {
+            Active.Draw(sender, args.DrawingSession);
+        }
+        catch (Exception ex) when (!_drawErrorShown)
+        {
+            _drawErrorShown = true;
+            StatusText.Text = $"draw failed: {ex.GetType().Name}: {ex.Message}";
+        }
+    }
 
     private bool _pressedOnNode;
     private bool _clusterDragging; // dragging a node in the Clusters view (fling, not file-move)
@@ -1224,9 +1309,15 @@ public sealed partial class MainPage : Page
                     case "motion": MotionToggle.IsOn = parts[2] == "on"; break;
                     case "system": SystemFoldersToggle.IsOn = parts[2] == "on"; break;
                     case "view": SwitchView(parts[2].ToLowerInvariant() == "cells" ? "Cells" : "Clusters"); break;
-                    case "force": // settings force <size|dupes|names|folder|date|type> <0-100>
-                        SetForce(parts[2].ToLowerInvariant(), Arg(3) / 100.0);
-                        return $"ok force {parts[2]}={Arg(3)} weights={_settings.ToForceWeights()}";
+                    case "facet": // settings facet order <csv> | settings facet toggle <name> <on|off>
+                        return parts[2].ToLowerInvariant() switch
+                        {
+                            "order" => PipeSetFacetOrder(parts[3]),
+                            "toggle" => PipeToggleFacet(parts[3], parts[4].ToLowerInvariant() == "on"),
+                            _ => "err unknown facet cmd",
+                        };
+                    case "tuning": // settings tuning <cohesion|repulsion|sizegravity> <0-100>
+                        return PipeSetTuning(parts[2].ToLowerInvariant(), Arg(3) / 100.0);
                     default: return "err unknown setting";
                 }
                 return $"ok view={_settings.ViewMode} theme={_settings.Theme} legend={_settings.ShowLegend} motion={_settings.ReduceMotion} system={_settings.ShowSystemFolders}";

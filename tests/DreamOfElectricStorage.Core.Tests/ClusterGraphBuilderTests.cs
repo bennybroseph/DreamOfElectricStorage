@@ -17,6 +17,8 @@ public class ClusterGraphBuilderTests
     private static FileNode File(ulong id, ulong parent, string name, long size) =>
         new(id, parent, name, size, IsDirectory: false);
 
+    private static string? Key(ClusterGraph g, int node, WellKind facet) => g.FacetKeys[node][(int)facet];
+
     [Fact]
     public async Task Build_SelectsLargestFiles_UpToCap()
     {
@@ -50,7 +52,7 @@ public class ClusterGraphBuilderTests
     }
 
     [Fact]
-    public async Task Build_FormsDuplicateWell_ForSameNameAndSize()
+    public async Task Build_DuplicateKey_MatchesForSameNameAndSize()
     {
         var c = await Volume("c", File(10, 5, "report.docx", 4096));
         var d = await Volume("d", File(10, 5, "report.docx", 4096)); // same name+size, other drive
@@ -58,11 +60,14 @@ public class ClusterGraphBuilderTests
         var graph = ClusterGraphBuilder.Build([c, d], maxNodes: 100);
 
         Assert.Equal(2, graph.Nodes.Count);
-        Assert.Contains(graph.Groups, g => g.Kind == WellKind.Duplicate && g.MemberIds.Count == 2);
+        // Same duplicate key → they nest together under a Duplicate grouping.
+        Assert.Equal(Key(graph, 0, WellKind.Duplicate), Key(graph, 1, WellKind.Duplicate));
+        // Home-drive differs → folder keys are per-volume and don't collide.
+        Assert.NotEqual(Key(graph, 0, WellKind.Folder), Key(graph, 1, WellKind.Folder));
     }
 
     [Fact]
-    public async Task Build_FormsSimilarNameWell_AcrossVersionedNames()
+    public async Task Build_SimilarNameKey_MatchesAcrossVersionedNames()
     {
         var v = await Volume("c",
             File(10, 5, "snapshot-001.zip", 1000),
@@ -71,11 +76,14 @@ public class ClusterGraphBuilderTests
 
         var graph = ClusterGraphBuilder.Build([v], maxNodes: 100);
 
-        Assert.Contains(graph.Groups, g => g.Kind == WellKind.SimilarName && g.MemberIds.Count == 3);
+        string? k = Key(graph, 0, WellKind.SimilarName);
+        Assert.NotNull(k);
+        Assert.Equal(k, Key(graph, 1, WellKind.SimilarName));
+        Assert.Equal(k, Key(graph, 2, WellKind.SimilarName));
     }
 
     [Fact]
-    public async Task Build_FormsTypeWell_ForSameCategory()
+    public async Task Build_TypeKey_MatchesForSameCategory()
     {
         var v = await Volume("c",
             File(10, 5, "one.png", 100),
@@ -84,12 +92,13 @@ public class ClusterGraphBuilderTests
 
         var graph = ClusterGraphBuilder.Build([v], maxNodes: 100);
 
-        // All three are images → a Type well of size 3.
-        Assert.Contains(graph.Groups, g => g.Kind == WellKind.Type && g.MemberIds.Count == 3);
+        // All three are images → one shared Type key.
+        Assert.Equal(Key(graph, 0, WellKind.Type), Key(graph, 1, WellKind.Type));
+        Assert.Equal(Key(graph, 0, WellKind.Type), Key(graph, 2, WellKind.Type));
     }
 
     [Fact]
-    public async Task Build_GlobalIds_AreSequential_AndItemsMatchNodes()
+    public async Task Build_GlobalIds_AreSequential_AndParallelToKeys()
     {
         var v = await Volume("c",
             File(10, 5, "a.bin", 300),
@@ -99,15 +108,16 @@ public class ClusterGraphBuilderTests
         var graph = ClusterGraphBuilder.Build([v], maxNodes: 100);
 
         Assert.Equal(graph.Nodes.Count, graph.Items.Count);
+        Assert.Equal(graph.Nodes.Count, graph.FacetKeys.Count);
         for (int i = 0; i < graph.Items.Count; i++)
         {
             Assert.Equal((ulong)i, graph.Items[i].Id);
             Assert.Equal(graph.Nodes[i].SizeBytes, graph.Items[i].SizeBytes);
+            // Every file has folder/dup/type keys; date may be null (no timestamp in the fixture).
+            Assert.NotNull(Key(graph, i, WellKind.Folder));
+            Assert.NotNull(Key(graph, i, WellKind.Duplicate));
+            Assert.NotNull(Key(graph, i, WellKind.Type));
         }
-        // Every group member id is a valid global index.
-        foreach (var g in graph.Groups)
-            foreach (ulong m in g.MemberIds)
-                Assert.True(m < (ulong)graph.Nodes.Count);
     }
 
     [Fact]
@@ -116,6 +126,6 @@ public class ClusterGraphBuilderTests
         var v = await Volume("c", File(10, 5, "empty.txt", 0));
         var graph = ClusterGraphBuilder.Build([v], maxNodes: 100);
         Assert.Empty(graph.Nodes);
-        Assert.Empty(graph.Groups);
+        Assert.Empty(graph.FacetKeys);
     }
 }

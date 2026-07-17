@@ -77,9 +77,11 @@
 
   <!-- Publish Properties -->
   <PropertyGroup>
-    <PublishReadyToRun Condition="'$(Configuration)' == 'Debug'">False</PublishReadyToRun>
-    <PublishReadyToRun Condition="'$(Configuration)' != 'Debug'">True</PublishReadyToRun>
-    <PublishTrimmed Condition="'$(Configuration)' == 'Debug'">False</PublishTrimmed>
-    <PublishTrimmed Condition="'$(Configuration)' != 'Debug'">True</PublishTrimmed>
+    <!-- Trimming is OFF: this app uses reflection-based JSON (SettingsStore) and hand-written COM
+         interop (ShellImageLoader / SHFileOperation) that the trimmer strips, producing a 0xC0000409
+         fail-fast on launch in Release. Revisit only with a trim-safe JSON context + [DynamicDependency]
+         on the COM paths. ReadyToRun off too (startup R2R not worth the crossgen risk here). -->
+    <PublishReadyToRun>False</PublishReadyToRun>
+    <PublishTrimmed>False</PublishTrimmed>
   </PropertyGroup>
 </Project>

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using DreamOfElectricStorage.Core;
@@ -21,17 +22,28 @@ public sealed class SettingsStore
     /// <summary>"Clusters" (relationship-well map, default) or "Cells" (circle-pack hierarchy).</summary>
     public string ViewMode { get; set; } = "Clusters";
 
-    // Clusters-view per-force strengths (0..1). Defaults mirror ForceWeights: type low so
-    // the map doesn't blob out of the box; relationships pull hardest.
-    public double ForceSizeGravity { get; set; } = 0.80;
-    public double ForceDuplicate { get; set; } = 0.90;
-    public double ForceSimilarName { get; set; } = 0.75;
-    public double ForceFolder { get; set; } = 0.50;
-    public double ForceDate { get; set; } = 0.30;
-    public double ForceType { get; set; } = 0.20;
+    // Clusters-view grouping: an ordered, root-first list of the ENABLED facets (a nested GROUP BY).
+    // Disabled facets are simply absent. Default = relationship-led broad-to-narrow nesting.
+    public string[] FacetOrder { get; set; } = ["Type", "Folder", "SimilarName", "Duplicate"];
 
-    public ForceWeights ToForceWeights() => new(
-        ForceSizeGravity, ForceDuplicate, ForceSimilarName, ForceFolder, ForceDate, ForceType);
+    // Always-on layout coefficients (0..1-ish). Anchor holds nodes at their packed slots (the pack
+    // arranges heavier-central); cohesion/repulsion are global.
+    public double Anchor { get; set; } = 0.80;
+    public double Cohesion { get; set; } = 1.00;
+    public double Repulsion { get; set; } = 1.00;
+
+    public LayoutTuning ToTuning() => new(Anchor, Repulsion, Cohesion);
+
+    /// <summary>Parse the persisted facet-name list into a <see cref="Core.FacetOrder"/>,
+    /// dropping unknown/duplicate entries.</summary>
+    public FacetOrder ToFacetOrder()
+    {
+        var kinds = new List<WellKind>();
+        foreach (string s in FacetOrder)
+            if (Enum.TryParse(s, out WellKind k) && !kinds.Contains(k))
+                kinds.Add(k);
+        return new Core.FacetOrder(kinds);
+    }
 
     public bool ShowLegend { get; set; } = true;
 
